@@ -1,0 +1,49 @@
+1. Data Source
+All data are sourced from the CSMAR database.
+
+2. Factor Construction
+
+SMB (Small Minus Big): In June of year t, stocks are sorted by circulating market capitalization. The returns of the portfolios are calculated for July to December of year t and January to June of year t+1. SMB is the difference in returns between the small-cap portfolio and the big-cap portfolio, computed under both circulating-market-capitalization-weighted and equal-weighted schemes.
+
+HML (High Minus Low): In June of year t, stocks are sorted by the book-to-market ratio as of December of year t-1. The returns are calculated for July to December of year t and January to June of year t+1. HML is the difference in returns between the high book-to-market portfolio and the low book-to-market portfolio (both circulating-market-cap-weighted and equal-weighted). The construction method follows Fama and French (1993).
+
+UMD (Up Minus Down, Momentum): Every month, stocks are sorted by their cumulative return from month t-12 to t-2. UMD is the difference in returns between the high-past-return portfolio and the low-past-return portfolio (both circulating-market-cap-weighted and equal-weighted). The construction method follows Carhart (1997).
+
+RMW (Robust Minus Weak, Profitability): In June of year t, stocks are sorted by profitability. Profitability is calculated as (operating revenue minus cost of goods sold, interest expense, selling expenses, and administrative expenses) divided by book value at the end of December of year t-1. RMW is the difference in returns for July to December of year t and January to June of year t+1 between the high-profitability portfolio and the low-profitability portfolio (both circulating-market-cap-weighted and equal-weighted). The construction method follows Fama and French (2015).
+
+CMA (Conservative Minus Aggressive, Investment): In June of year t, stocks are sorted by investment level. Investment level is calculated as the increase in total assets from fiscal year t-2 to t-1 divided by total assets at the end of fiscal year t-2. CMA is the difference in returns for July to December of year t and January to June of year t+1 between the low-investment portfolio and the high-investment portfolio (both circulating-market-cap-weighted and equal-weighted). The construction method follows Fama and French (2015).
+
+MKT: The value-weighted market return of all A-share stocks, using circulating market capitalization.
+
+Rf: The one-year deposit rate.
+
+3. File Formats
+The data files are provided in CSV and TXT formats.
+
+4. Variable Descriptions
+
+trdyr, trdwk, trdmn, trddy ！ Trading date (year, week, month, day)
+
+mkt_rf ！ Market risk factor (market excess return)
+
+smb ！ Size factor (SMB)
+
+hml ！ Book-to-market factor (HML)
+
+umd ！ Momentum factor (UMD)
+
+rmw ！ Profitability factor (RMW)
+
+cma ！ Investment factor (CMA)
+
+rf ！ Risk-free rate
+
+smb_equal ！ Equal-weighted size factor
+
+hml_equal ！ Equal-weighted book-to-market factor
+
+umd_equal ！ Equal-weighted momentum factor
+
+rmw_equal ！ Equal-weighted profitability factor
+
+cma_equal ！ Equal-weighted investment factor
