@@ -197,7 +197,7 @@ def compute_all_factors(df):
     # ===== ST_Rev (t-1) - Short-term reversal
     df['ST_Rev'] = df.groupby('股票代码_Stkcd')['ret'].shift(1)
 
-    # ===== r12_2 (t-12 ~ t-3) - Momentum factor
+    # ===== r12_2 (t-12 ~ t-2) - Momentum factor
     # Compute r12_2 per stock: cumulative return from t-12 to t-2
     def compute_r12_2(group_df):
         group_df = group_df.sort_values('日期_Date').reset_index(drop=True)
