@@ -21,6 +21,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 CODE_DIR = PROJECT_ROOT / "code"
+OUTPUT_DIR = PROJECT_ROOT / "output"
+CANDIDATE_POOLS_DIR = OUTPUT_DIR / "candidate_pools"
 
 # List of model subdirectories (relative to code/ folder)
 # These must contain build_pool.py and prune.py as appropriate.
