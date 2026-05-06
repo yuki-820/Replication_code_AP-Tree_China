@@ -4,23 +4,38 @@
 """
 Download raw data from Zenodo (DOI: 10.5281/zenodo.20025878).
 Files are saved to data/raw/monthly/ and data/raw/financial/.
+
+Strict requirement: the `data/` directory must already exist.
+Sub directories (`data/raw/monthly/`, `data/raw/financial/`) will be
+created automatically if they are missing.
 """
 
-import requests
-from pathlib import Path
-from tqdm import tqdm
+import sys
 import time
+from pathlib import Path
+
+import requests
+from tqdm import tqdm
 
 # ----------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_ROOT / "data"
+
+# The data directory MUST exist before running this script.
+if not DATA_DIR.is_dir():
+    print(f"ERROR: Required directory does not exist: {DATA_DIR}")
+    print("Please create the 'data' folder first, then run this script again.")
+    sys.exit(1)
+
 ZENODO_API = "https://zenodo.org/api/records/20032245"   # DOI record ID
 OUTPUT_DIRS = {
-    "monthly": PROJECT_ROOT / "data" / "raw" / "monthly",
-    "financial": PROJECT_ROOT / "data" / "raw" / "financial",
+    "monthly": DATA_DIR / "raw" / "monthly",
+    "financial": DATA_DIR / "raw" / "financial",
 }
 
+# Create sub-directories automatically (data/ already exists)
 for d in OUTPUT_DIRS.values():
     d.mkdir(parents=True, exist_ok=True)
 
@@ -36,7 +51,7 @@ def classify_file(filename: str) -> str:
         return "monthly"
     if "资产" in filename or "利润" in filename:
         return "financial"
-    # 默认归入 monthly
+    # Default to monthly if no keyword matches
     return "monthly"
 
 def download_file(url: str, dest_path: Path) -> bool:
@@ -61,6 +76,7 @@ def download_file(url: str, dest_path: Path) -> bool:
 
 # ----------------------------------------------------------------------
 def main():
+    """Fetch file list from Zenodo and download each file."""
     print("Fetching Zenodo record...")
     resp = requests.get(ZENODO_API)
     resp.raise_for_status()
