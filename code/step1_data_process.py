@@ -198,26 +198,26 @@ def compute_all_factors(df):
     df['ST_Rev'] = df.groupby('股票代码_Stkcd')['ret'].shift(1)
 
     # ===== r12_2 (t-12 ~ t-3) - Momentum factor
-    # Compute r12_2 per stock: cumulative return from t-12 to t-3
+    # Compute r12_2 per stock: cumulative return from t-12 to t-2
     def compute_r12_2(group_df):
         group_df = group_df.sort_values('日期_Date').reset_index(drop=True)
         
         n = len(group_df)
         r12_2_values = [np.nan] * n
         
-        # For each date compute r12_2 (cumulative return from t-12 to t-3)
+        # For each date compute r12_2 (cumulative return from t-12 to t-2)
         for i in range(n):
             # Current index corresponds to time "t"
-            # We need returns from t-12 to t-3 -> indices i-12 to i-3
-            start_idx = i - 12  # t-12
-            end_idx = i - 3     # t-3 (inclusive)
+            # We need returns from t-12 to t-2 -> indices i-12 to i-2
+            start_idx = i - 12   # t-12
+            end_idx = i - 2      # t-2 (inclusive)
             
             if start_idx >= 0 and end_idx >= 0 and start_idx <= end_idx:
-                # Extract returns from t-12 to t-3
+                # Extract returns from t-12 to t-2 (11 months)
                 period_rets = group_df.iloc[start_idx:end_idx+1]['ret']
                 
-                # Check that all returns are valid (non-NaN) and cover exactly 10 months
-                if not period_rets.isna().any() and len(period_rets) == 10:
+                # Check that all returns are valid (non-NaN) and cover exactly 11 months
+                if not period_rets.isna().any() and len(period_rets) == 11:
                     # Compute cumulative return
                     cumulative_ret = (1 + period_rets).prod() - 1
                     r12_2_values[i] = cumulative_ret
