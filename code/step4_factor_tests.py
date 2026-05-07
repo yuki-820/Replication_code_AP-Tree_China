@@ -429,8 +429,35 @@ def main():
             print("Saved APTree_clean_K40_top8_alpha.csv")
     else:
         print("APTree_clean_K40 CH4 results missing.")
+    
+    # ---- 7 TripleSort128 clean top8 CH4 alpha ----
+    strat_key = 'TripleSort128_clean'
+    if strat_key in results_store and 'CH4' in results_store[strat_key]:
+        df_ch4 = results_store[strat_key]['CH4']
+        top8 = df_ch4['alpha_annual'].sort_values(ascending=False).head(8)
+        summary_metrics = load_summary_metrics(strat_key)
+        rows = []
+        for port in top8.index:
+            row = {'Feature': extract_feature_string(port)}
+            for m in ['CH3', 'CH4', 'Carhart4', 'FF5', 'FF6']:
+                if m in results_store[strat_key]:
+                    alpha = results_store[strat_key][m].loc[port, 'alpha_annual'] if port in results_store[strat_key][m].index else np.nan
+                    row[f'alpha_{m}'] = f"{alpha*100:.2f}%" if not pd.isna(alpha) else ''
+            if port in summary_metrics:
+                row['Test_Sharpe'] = f"{summary_metrics[port]['test_sharpe']:.4f}" if not pd.isna(summary_metrics[port]['test_sharpe']) else ''
+                row['Train_Sharpe'] = f"{summary_metrics[port]['train_sharpe']:.4f}" if not pd.isna(summary_metrics[port]['train_sharpe']) else ''
+                row['CV_Sharpe'] = f"{summary_metrics[port]['cv_sharpe']:.4f}" if not pd.isna(summary_metrics[port]['cv_sharpe']) else ''
+                row['lambda'] = f"({summary_metrics[port]['lam0']}, {summary_metrics[port]['lam2']})" if not pd.isna(summary_metrics[port]['lam0']) else ''
+            else:
+                row['Test_Sharpe'] = row['Train_Sharpe'] = row['CV_Sharpe'] = row['lambda'] = ''
+            rows.append(row)
+        if rows:
+            pd.DataFrame(rows).to_csv(out_dir / 'TripleSort128_clean_top8_CH4_alpha.csv', index=False)
+            print("Saved TripleSort128_clean_top8_CH4_alpha.csv")
+    else:
+        print("TripleSort128_clean CH4 results missing.")
 
-    # ---- 7. GRS cleaned methods ----
+    # ---- 8. GRS cleaned methods ----
     grs_clean_rows = []
     for method_key, pretty_name in [('TripleSort128_clean', 'TripleSort128_clean'),
                                     ('APTree_clean_K20', 'APTree_clean_K20'),
@@ -450,7 +477,7 @@ def main():
     else:
         print("No GRS data for cleaned sample methods.")
 
-    # ---- 8. All detailed alpha results (for later use) ----
+    # ---- 9. All detailed alpha results (for later use) ----
     all_alpha = []
     for strat_key, models in results_store.items():
         for model_name, df_res in models.items():
@@ -471,7 +498,7 @@ def main():
     else:
         print("No detailed alpha results to save.")
 
-        # ---- 9. Long-only comparison built from All_Alpha_Detailed.csv (using extract_feature_string) ----
+    # ---- 10. Long-only comparison built from All_Alpha_Detailed.csv (using extract_feature_string) ----
     alpha_file = out_dir / 'All_Alpha_Detailed.csv'
     if alpha_file.exists():
         df_alpha = pd.read_csv(alpha_file)
