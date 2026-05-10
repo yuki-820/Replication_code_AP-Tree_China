@@ -32,7 +32,7 @@ CONFIG = {
     'lambda2_list': [0.06, 0.04, 0.05, 0.01, 0.02, 0.03],
     'kmin': 5,
     'target_kmax_list': [20, 40],
-    'depth_weight_power': 2.0,
+    'depth_weight_power': 0.5,
 }
 
 def get_node_depth(name):
@@ -94,12 +94,13 @@ def lars_path_auto(X, y, kmin, kmax, max_iter=100):
 
 def solve_sparse_sdf_via_lars(returns_train, lambda0, lambda2, kmin, kmax, depth_weights=None):
     n_samples, n_assets = returns_train.shape
-    mu = np.mean(returns_train, axis=0)
-    sigma = np.cov(returns_train, rowvar=False, bias=True)
     if depth_weights is not None:
-        returns_weighted = returns_train / depth_weights
-        mu = np.mean(returns_weighted, axis=0)
-        sigma = np.cov(returns_weighted, rowvar=False, bias=True)
+        # Adjust returns by multiplying depth weights (shrink deep nodes)
+        returns_adj = returns_train * depth_weights
+    else:
+        returns_adj = returns_train
+    mu = np.mean(returns_adj, axis=0)
+    sigma = np.cov(returns_adj, rowvar=False, bias=True)
     mu_robust = robust_mean_estimate(mu, lambda0)
     sigma_robust = robust_covariance_estimate(sigma, lambda2, n_assets)
     sigma_robust += 1e-8 * np.eye(n_assets)
@@ -108,7 +109,8 @@ def solve_sparse_sdf_via_lars(returns_train, lambda0, lambda2, kmin, kmax, depth
     results = []
     for beta, K in zip(beta_path, K_path):
         if depth_weights is not None:
-            weights = beta / depth_weights
+            # Recover portfolio weights: multiply beta by depth_weights and normalize
+            weights = beta * depth_weights
         else:
             weights = beta.copy()
         abs_sum = np.sum(np.abs(weights))
