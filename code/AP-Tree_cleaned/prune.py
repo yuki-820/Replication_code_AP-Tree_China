@@ -1,7 +1,11 @@
 """
-AP-Tree (cleaned sample) - LARS pruning
+AP-Tree (cleaned sample) - LARS pruning with two depth-weight schemes.
 Read output/candidate_pools/AP-Tree_cleaned/Sec*.csv
-Prune each cross-section with cross-validation, output test period excess return series (kmax=20 and 40)
+Prune each cross-section using a fixed train/valid time-series split (2:1),
+evaluate two depth-weighting schemes (power = 0.5 and 2.0), and output test-period metrics:
+  - monthly average excess return
+  - maximum drawdown
+  - annualised Sharpe ratio
 Output: output/pruned/AP-Tree_cleaned/
 """
 
@@ -11,11 +15,10 @@ from pathlib import Path
 import warnings
 import sys
 from sklearn.linear_model import lars_path
-from sklearn.model_selection import KFold
 
 warnings.filterwarnings('ignore')
 
-# ==================== Dynamic path config ====================
+# ==================== Dynamic path configuration ====================
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
@@ -24,10 +27,8 @@ CONFIG = {
     'output_dir': str(PROJECT_ROOT / 'output' / 'pruned' / 'AP-Tree_cleaned'),
     'train_end_date': '2020-12-31',
     'test_start_date': '2021-01-01',
-    'rf_col': 'rf_rate',          # English column name
-    'n_folds': 3,
-    'shuffle': True,
-    'random_state': 42,
+    'rf_col': 'rf_rate',
+    'valid_ratio': 1/3,              # fraction of training period used for validation (last portion)
     'lambda0_list': [
         0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
         0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90
@@ -39,11 +40,13 @@ CONFIG = {
     ],
     'kmin': 5,
     'target_kmax_list': [20, 40],
-    'depth_weight_power': 2.0,
-    'output_annualized_return': True,   # Add annualized return in summary
+    'depth_weight_power': [0.5, 2.0],   # two schemes: power=0.5 (boost deep nodes), power=2.0 (shrink deep nodes)
+    'output_annualized_return': True,
 }
 
+# ----------------------------------------------------------------------
 def get_node_depth(name):
+    """Extract tree depth from node name (last numeric part length)."""
     try:
         last = name.split('_')[-1]
         return len(last) if last.isdigit() else 0
@@ -51,6 +54,11 @@ def get_node_depth(name):
         return 0
 
 def compute_depth_weights(node_names, power=2.0):
+    """
+    Compute depth weights: 1 / sqrt(power^depth)
+    - power = 0.5  -> weight ~ sqrt(2^depth)   (boost deep nodes)
+    - power = 2.0  -> weight ~ 1/sqrt(2^depth) (original paper)
+    """
     depths = np.array([get_node_depth(name) for name in node_names])
     weights = 1.0 / np.sqrt(power ** depths)
     return weights, depths
@@ -103,22 +111,24 @@ def lars_path_auto(X, y, kmin, kmax, max_iter=100):
 def solve_sparse_sdf_via_lars(returns_train, lambda0, lambda2, kmin, kmax, depth_weights=None):
     n_samples, n_assets = returns_train.shape
     if depth_weights is not None:
-        # Adjust returns by multiplying depth weights (shrink deep nodes)
         returns_adj = returns_train * depth_weights
     else:
         returns_adj = returns_train
+
     mu = np.mean(returns_adj, axis=0)
     sigma = np.cov(returns_adj, rowvar=False, bias=True)
+
     mu_robust = robust_mean_estimate(mu, lambda0)
     sigma_robust = robust_covariance_estimate(sigma, lambda2, n_assets)
     sigma_robust += 1e-8 * np.eye(n_assets)
+
     X, y = gls_transform_for_lasso(sigma_robust, mu_robust)
     beta_path, K_path = lars_path_auto(X, y, kmin, kmax)
+
     results = []
     for beta, K in zip(beta_path, K_path):
         if depth_weights is not None:
-            # Recover portfolio weights: multiply beta by depth_weights and normalize
-            weights = beta * depth_weights
+            weights = beta * depth_weights          # recover original scale
         else:
             weights = beta.copy()
         abs_sum = np.sum(np.abs(weights))
@@ -132,6 +142,7 @@ def solve_sparse_sdf_via_lars(returns_train, lambda0, lambda2, kmin, kmax, depth
             'lambda2': lambda2,
         })
     return results
+
 def evaluate_portfolio(returns, weights):
     if len(weights) == 0 or np.sum(np.abs(weights)) < 1e-12:
         return -np.inf
@@ -145,31 +156,52 @@ def evaluate_portfolio(returns, weights):
     return np.mean(port_returns) / std_ret
 
 def prune_single_section(df, section_name, config, target_kmax):
+    """
+    Prune a single cross-section using all depth-weight schemes in config.
+    Returns a list of result dictionaries (one per scheme).
+    """
     print(f"\n  Pruning section: {section_name} (target max nodes = {target_kmax})")
+
+    # ---- data preparation -------------------------------------------------
     rf = df[config['rf_col']].values.reshape(-1, 1)
     node_names = [col for col in df.columns if col != config['rf_col']]
     node_returns = df[node_names].values
     excess_returns = node_returns - rf
     excess_returns = np.nan_to_num(excess_returns, nan=0.0)
     node_returns = np.nan_to_num(node_returns, nan=0.0)
+
     train_mask = df.index <= pd.to_datetime(config['train_end_date'])
     test_mask = df.index >= pd.to_datetime(config['test_start_date'])
     X_train = excess_returns[train_mask]
     X_test = excess_returns[test_mask]
     raw_test_returns = node_returns[test_mask]
+
     if X_train.shape[0] < 12 or X_train.shape[1] < config['kmin']:
-        print(f"    Warning: insufficient training data ({X_train.shape[0]} periods, {X_train.shape[1]} nodes), skip")
-        return None
-    depth_weights, depths = compute_depth_weights(node_names, config['depth_weight_power'])
-    kf = KFold(n_splits=min(config['n_folds'], X_train.shape[0]), 
-               shuffle=config['shuffle'], random_state=config['random_state'])
-    cv_results = []
-    for lam0 in config['lambda0_list']:
-        for lam2 in config['lambda2_list']:
-            fold_best_srs = []
-            for tr_idx, val_idx in kf.split(X_train):
-                X_tr = X_train[tr_idx]
-                X_val = X_train[val_idx]
+        print(f"    Warning: insufficient training data "
+              f"({X_train.shape[0]} periods, {X_train.shape[1]} nodes), skip")
+        return []
+
+    # ---- time-series train/validation split (fixed order, 2:1) -------------
+    n_train_total = X_train.shape[0]
+    n_valid = max(1, int(np.floor(n_train_total * config['valid_ratio'])))
+    n_train_sub = n_train_total - n_valid
+    X_tr = X_train[:n_train_sub]
+    X_val = X_train[n_train_sub:]       # most recent part
+    if X_val.shape[0] == 0:
+        X_val = X_tr[-1:].copy()        # fallback: use last observation as validation
+
+    all_section_results = []
+
+    # ---- loop over depth-weight schemes (power in [0.5, 2.0]) -------------
+    for power in config['depth_weight_power']:
+        depth_weights, _ = compute_depth_weights(node_names, power=power)
+        scheme_name = f"dw_power{power}"   # e.g. dw_power0.5, dw_power2.0
+        print(f"    --- Weight scheme: {scheme_name} ---")
+
+        # Cross-validation over (lambda0, lambda2) using the single validation fold
+        cv_results = []
+        for lam0 in config['lambda0_list']:
+            for lam2 in config['lambda2_list']:
                 solutions = solve_sparse_sdf_via_lars(
                     X_tr, lam0, lam2,
                     config['kmin'], target_kmax,
@@ -183,81 +215,122 @@ def prune_single_section(df, section_name, config, target_kmax):
                     if val_sr > best_val_sr:
                         best_val_sr = val_sr
                 if best_val_sr > -np.inf:
-                    fold_best_srs.append(best_val_sr)
-            if fold_best_srs:
-                cv_results.append({
-                    'lam0': lam0,
-                    'lam2': lam2,
-                    'avg_cv_sr': np.mean(fold_best_srs),
-                })
-    if not cv_results:
-        print(f"    Cross-validation failed, using default parameters")
-        best_lam0, best_lam2 = 0.2, 0.001
-        best_cv_sr = 0.0
-    else:
-        best = max(cv_results, key=lambda x: x['avg_cv_sr'])
-        best_lam0, best_lam2 = best['lam0'], best['lam2']
-        best_cv_sr = best['avg_cv_sr']
-        print(f"    Optimal hyperparameters: λ0={best_lam0}, λ2={best_lam2}, CV_SR={best_cv_sr:.4f}")
-    all_solutions = solve_sparse_sdf_via_lars(
-        X_train, best_lam0, best_lam2,
-        config['kmin'], target_kmax,
-        depth_weights
-    )
-    if not all_solutions:
-        print(f"    Final training no solution")
-        return None
-    best_solution = None
-    best_train_sr = -np.inf
-    for sol in all_solutions:
-        tr_sr = evaluate_portfolio(X_train, sol['weights'])
-        if tr_sr > best_train_sr:
-            best_train_sr = tr_sr
-            best_solution = sol
-    if best_solution is None:
-        return None
-    final_weights = best_solution['weights']
-    final_K = best_solution['K']
-    if len(X_test) > 0:
-        test_sr = evaluate_portfolio(X_test, final_weights)
-        test_raw_returns = raw_test_returns @ final_weights
-        test_dates = df.index[test_mask]
-        test_returns_series = pd.Series(X_test @ final_weights, index=test_dates, name='excess_return')
-        test_annualized_return = test_raw_returns.mean() * 12
-    else:
-        test_sr = np.nan
-        test_returns_series = pd.Series(dtype=float)
-        test_annualized_return = np.nan
-    selected_nodes = []
-    for name, w in zip(node_names, final_weights):
-        if np.abs(w) > 1e-8:
-            selected_nodes.append({
-                'node_name': name,
-                'depth': get_node_depth(name),
-                'weight': w
-            })
-    selected_K = len(selected_nodes)
-    print(f"    Done: {len(node_names)} → {selected_K} nodes, test monthly Sharpe = {test_sr:.4f}" if not np.isnan(test_sr) else "    Test Sharpe: no data")
-    return {
-        'section_name': section_name,
-        'target_kmax': target_kmax,
-        'train_sharpe': best_train_sr,
-        'test_sharpe': test_sr,
-        'test_annualized_return': test_annualized_return,
-        'cv_sharpe': best_cv_sr,
-        'best_lam0': best_lam0,
-        'best_lam2': best_lam2,
-        'n_assets': len(node_names),
-        'selected_K': selected_K,
-        'selected_nodes': selected_nodes,
-        'test_returns': test_returns_series,
-    }
+                    cv_results.append({
+                        'lam0': lam0,
+                        'lam2': lam2,
+                        'val_sr': best_val_sr,
+                    })
 
+        if not cv_results:
+            print(f"    Validation failed for scheme {scheme_name}, using default parameters")
+            best_lam0, best_lam2 = 0.2, 0.001
+            best_val_sr = 0.0
+        else:
+            best = max(cv_results, key=lambda x: x['val_sr'])
+            best_lam0, best_lam2 = best['lam0'], best['lam2']
+            best_val_sr = best['val_sr']
+            print(f"    Optimal hyperparameters: λ0={best_lam0}, λ2={best_lam2}, Val SR={best_val_sr:.4f}")
+
+        # Refit on the entire training period using the chosen hyperparameters
+        all_solutions = solve_sparse_sdf_via_lars(
+            X_train, best_lam0, best_lam2,
+            config['kmin'], target_kmax,
+            depth_weights
+        )
+        if not all_solutions:
+            print(f"    Final training no solution for {scheme_name}")
+            continue
+
+        # Select the solution with the highest in-sample Sharpe ratio
+        best_solution = None
+        best_train_sr = -np.inf
+        for sol in all_solutions:
+            tr_sr = evaluate_portfolio(X_train, sol['weights'])
+            if tr_sr > best_train_sr:
+                best_train_sr = tr_sr
+                best_solution = sol
+
+        if best_solution is None:
+            continue
+
+        final_weights = best_solution['weights']
+        final_K = best_solution['K']
+
+        # ---- test-set metrics ---------------------------------------------
+        if len(X_test) > 0:
+            test_excess_series = X_test @ final_weights
+            test_sr_monthly = evaluate_portfolio(X_test, final_weights)   # monthly Sharpe
+            test_raw_returns = raw_test_returns @ final_weights
+            test_dates = df.index[test_mask]
+
+            # Monthly average excess return (not annualised)
+            monthly_avg_excess = np.mean(test_excess_series)
+
+            # Maximum drawdown (based on raw cumulative returns)
+            cum_ret = (1 + test_raw_returns).cumprod()
+            running_max = np.maximum.accumulate(cum_ret)
+            drawdown = (cum_ret - running_max) / running_max
+            max_drawdown = drawdown.min()
+
+            # Annualised Sharpe ratio
+            annualised_sharpe = test_sr_monthly * np.sqrt(12) if not np.isnan(test_sr_monthly) else np.nan
+
+            # Store test excess return series (name includes weight scheme)
+            test_returns_series = pd.Series(
+                test_excess_series,
+                index=test_dates,
+                name=f"{section_name}_{scheme_name}"
+            )
+        else:
+            test_sr_monthly = np.nan
+            monthly_avg_excess = np.nan
+            max_drawdown = np.nan
+            annualised_sharpe = np.nan
+            test_returns_series = pd.Series(dtype=float)
+
+        # ---- selected nodes -----------------------------------------------
+        selected_nodes = []
+        for name, w in zip(node_names, final_weights):
+            if np.abs(w) > 1e-8:
+                selected_nodes.append({
+                    'node_name': name,
+                    'depth': get_node_depth(name),
+                    'weight': w
+                })
+        selected_K = len(selected_nodes)
+
+        print(f"    Done ({scheme_name}): {len(node_names)} → {selected_K} nodes, "
+              f"test monthly Sharpe = {test_sr_monthly:.4f}" if not np.isnan(test_sr_monthly)
+              else f"    Test Sharpe ({scheme_name}): no data")
+
+        result = {
+            'section_name': section_name,
+            'target_kmax': target_kmax,
+            'weight_scheme': scheme_name,
+            'train_sharpe': best_train_sr,
+            'val_sharpe': best_val_sr,
+            'test_sharpe_monthly': test_sr_monthly,
+            'monthly_avg_excess_return': monthly_avg_excess,
+            'max_drawdown': max_drawdown,
+            'annualised_sharpe': annualised_sharpe,
+            'best_lam0': best_lam0,
+            'best_lam2': best_lam2,
+            'n_assets': len(node_names),
+            'selected_K': selected_K,
+            'selected_nodes': selected_nodes,
+            'test_returns': test_returns_series,
+        }
+        all_section_results.append(result)
+
+    return all_section_results
+
+
+# ==================== main ================================================
 if __name__ == "__main__":
     print("=" * 120)
-    print("=== AP-Tree (cleaned sample) - LARS pruning ===")
-    print(f"Training period end: {CONFIG['train_end_date']}, Test period start: {CONFIG['test_start_date']}")
-    print("=== Allow negative weights, absolute sum normalization, output monthly Sharpe and test returns ===")
+    print("=== AP-Tree (cleaned sample) - LARS pruning with two depth-weight schemes ===")
+    print(f"Training end: {CONFIG['train_end_date']}, Test start: {CONFIG['test_start_date']}")
+    print("=== Fixed train/valid time-series split (2:1), output monthly avg excess, max DD, annual SR ===")
     print("=" * 120)
 
     section_dir = Path(CONFIG['tree_sections_dir'])
@@ -269,6 +342,7 @@ if __name__ == "__main__":
     output_dir = Path(CONFIG['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---- load all cross-sections -----------------------------------------
     section_dfs = {}
     for file in sorted(section_dir.glob("Sec*.csv")):
         df = pd.read_csv(file, index_col=0, parse_dates=True)
@@ -280,51 +354,61 @@ if __name__ == "__main__":
     all_results = []
     for sec_name, df in section_dfs.items():
         for kmax in CONFIG['target_kmax_list']:
-            result = prune_single_section(df, sec_name, CONFIG, target_kmax=kmax)
-            if result:
-                all_results.append(result)
+            results_schemes = prune_single_section(df, sec_name, CONFIG, target_kmax=kmax)
+            if results_schemes:
+                all_results.extend(results_schemes)
 
-    print(f"\nSuccessfully pruned {len(all_results)} (section × kmax)")
+    print(f"\nSuccessfully pruned {len(all_results)} (section × kmax × weight_scheme)")
 
+    # ---- produce output for each target kmax ------------------------------
     for kmax in CONFIG['target_kmax_list']:
         filtered = [r for r in all_results if r['target_kmax'] == kmax]
         if not filtered:
             continue
-        # Summary
+
+        # Summary table
         summary_data = []
         for res in filtered:
             row = {
                 'Section': res['section_name'],
+                'Weight_Scheme': res['weight_scheme'],
                 'Target_Kmax': res['target_kmax'],
                 'Original_Nodes': res['n_assets'],
                 'Selected_Nodes': res['selected_K'],
                 'Compression_Ratio': f"{res['selected_K']/res['n_assets']*100:.1f}%",
                 'Train_Sharpe': f"{res['train_sharpe']:.4f}",
-                'CV_Sharpe': f"{res['cv_sharpe']:.4f}",
-                'Test_Sharpe': f"{res['test_sharpe']:.4f}",
+                'Val_Sharpe': f"{res['val_sharpe']:.4f}",
+                'Test_Monthly_Sharpe': f"{res['test_sharpe_monthly']:.4f}",
+                'Monthly_Avg_Excess_Return': f"{res['monthly_avg_excess_return']:.6f}",
+                'Max_Drawdown': f"{res['max_drawdown']*100:.2f}%" if not np.isnan(res['max_drawdown']) else "NaN",
+                'Annualised_Sharpe': f"{res['annualised_sharpe']:.4f}",
                 'Best_λ0': res['best_lam0'],
-                'Best_λ2': res['best_lam2']
+                'Best_λ2': res['best_lam2'],
             }
-            if CONFIG['output_annualized_return']:
-                row['Annualized_Return_pct'] = f"{res['test_annualized_return']*100:.2f}%" if not np.isnan(res['test_annualized_return']) else "NaN"
             summary_data.append(row)
+
         summary_df = pd.DataFrame(summary_data)
         summary_path = output_dir / f"All_Sections_Summary_kmax{kmax}.csv"
         summary_df.to_csv(summary_path, index=False, encoding='utf-8-sig')
-        print(f"\n{kmax} mode summary saved: {summary_path}")
-        # Detailed results with selected nodes
+        print(f"\nSummary (kmax={kmax}) saved: {summary_path}")
+
+        # Detailed node-level output
         detailed_rows = []
         for res in filtered:
             detailed_rows.append({
                 'Section': res['section_name'],
+                'Weight_Scheme': res['weight_scheme'],
                 'Target_Kmax': res['target_kmax'],
                 'Type': 'Section Info',
                 'Node_Name': '',
                 'Depth': '',
                 'Weight': '',
                 'Train_Sharpe': f"{res['train_sharpe']:.4f}",
-                'CV_Sharpe': f"{res['cv_sharpe']:.4f}",
-                'Test_Sharpe': f"{res['test_sharpe']:.4f}",
+                'Val_Sharpe': f"{res['val_sharpe']:.4f}",
+                'Test_Monthly_Sharpe': f"{res['test_sharpe_monthly']:.4f}",
+                'Annualised_Sharpe': f"{res['annualised_sharpe']:.4f}",
+                'Monthly_Avg_Excess_Return': f"{res['monthly_avg_excess_return']:.6f}",
+                'Max_Drawdown': f"{res['max_drawdown']*100:.2f}%" if not np.isnan(res['max_drawdown']) else "NaN",
                 'Best_λ0': res['best_lam0'],
                 'Best_λ2': res['best_lam2'],
                 'Original_Nodes': res['n_assets'],
@@ -333,14 +417,18 @@ if __name__ == "__main__":
             for node in res['selected_nodes']:
                 detailed_rows.append({
                     'Section': res['section_name'],
+                    'Weight_Scheme': res['weight_scheme'],
                     'Target_Kmax': res['target_kmax'],
                     'Type': 'Selected Node',
                     'Node_Name': node['node_name'],
                     'Depth': node['depth'],
                     'Weight': f"{node['weight']:.6f}",
                     'Train_Sharpe': '',
-                    'CV_Sharpe': '',
-                    'Test_Sharpe': '',
+                    'Val_Sharpe': '',
+                    'Test_Monthly_Sharpe': '',
+                    'Annualised_Sharpe': '',
+                    'Monthly_Avg_Excess_Return': '',
+                    'Max_Drawdown': '',
                     'Best_λ0': '',
                     'Best_λ2': '',
                     'Original_Nodes': '',
@@ -349,17 +437,18 @@ if __name__ == "__main__":
         detailed_df = pd.DataFrame(detailed_rows)
         detailed_path = output_dir / f"All_Sections_Detailed_Results_kmax{kmax}.csv"
         detailed_df.to_csv(detailed_path, index=False, encoding='utf-8-sig')
-        print(f"Detailed results saved: {detailed_path}")
-        # Test excess return series
+        print(f"Detailed results (kmax={kmax}) saved: {detailed_path}")
+
+        # Test excess return series (columns named SecName_scheme)
         test_returns_dict = {}
         for res in filtered:
             if 'test_returns' in res and not res['test_returns'].empty:
-                test_returns_dict[res['section_name']] = res['test_returns']
+                test_returns_dict[res['test_returns'].name] = res['test_returns']
         if test_returns_dict:
             test_returns_df = pd.concat(test_returns_dict, axis=1)
             test_returns_path = output_dir / f"Test_Excess_Returns_kmax{kmax}.csv"
             test_returns_df.to_csv(test_returns_path, encoding='utf-8-sig')
-            print(f"Test excess return series saved: {test_returns_path}")
+            print(f"Test excess return series (kmax={kmax}) saved: {test_returns_path}")
 
     print("\n" + "=" * 120)
     print("All pruning tasks completed!")
