@@ -439,7 +439,7 @@ else:
     fin = fin.sort_values(['ComCd', 'EndDt']).drop_duplicates(['ComCd', 'ReportYear'], keep='last')
     # Correct OWC calculation
     fin['owc'] = (fin['TotCurrAss'] - fin['CashEqv'] - fin['TotCurLia']
-                  - fin['ShortLoan'].fillna(0) - fin['TaxPay'].fillna(0))
+                  + fin['ShortLoan'].fillna(0) + fin['TaxPay'].fillna(0))
     fin['StkEqu'] = fin['StkEquPreShare'].combine_first(fin['TotShareEquit'])
     fin = fin.sort_values(['ComCd', 'EndDt'])
     fin['TotAss_lag'] = fin.groupby('ComCd')['TotAss'].shift(1)
