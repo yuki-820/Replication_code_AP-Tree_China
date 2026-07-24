@@ -1,7 +1,4 @@
 
----
-
-```markdown
 # Replication Code (Work in Progress)
 
 This repository contains the replication code for the paper  
