@@ -1,7 +1,11 @@
 """
 TripleSort128 (cleaned sample) - LARS pruning with long-only constraint (max 5 assets)
 Read output/candidate_pools/TripleSort128_cleaned/Sec*_triplesort.csv
-Prune each cross-section, enforce non-negative weights, output test excess returns
+Prune each cross-section using a fixed train/valid time-series split (2:1),
+enforce non-negative weights, output test-period metrics:
+  - monthly average excess return
+  - maximum drawdown
+  - annualised Sharpe ratio
 Output: output/pruned/TripleSort128_cleaned_longonly/
 """
 
@@ -11,7 +15,6 @@ from pathlib import Path
 import warnings
 import sys
 from sklearn.linear_model import lars_path
-from sklearn.model_selection import KFold
 
 warnings.filterwarnings('ignore')
 
@@ -24,9 +27,7 @@ CONFIG = {
     'output_dir': str(PROJECT_ROOT / 'output' / 'pruned' / 'TripleSort128_cleaned_longonly'),
     'train_end_date': '2020-12-31',
     'test_start_date': '2021-01-01',
-    'n_folds': 3,
-    'shuffle': True,
-    'random_state': 42,
+    'valid_ratio': 1/3,              # fraction of training period used for validation (last portion)
     'lambda0_list': [
         0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
         0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90
@@ -158,44 +159,53 @@ def prune_single_section(df, section_name, config):
         print(f"    Warning: insufficient training samples, skip")
         return None
     depth_weights = None
-    kf = KFold(n_splits=min(config['n_folds'], X_train.shape[0]),
-               shuffle=config['shuffle'], random_state=config['random_state'])
+
+    # ---- time-series train/validation split (fixed order, 2:1) -------------
+    n_train_total = X_train.shape[0]
+    n_valid = max(1, int(np.floor(n_train_total * config['valid_ratio'])))
+    n_train_sub = n_train_total - n_valid
+    X_tr = X_train[:n_train_sub]
+    X_val = X_train[n_train_sub:]       # most recent part
+    if X_val.shape[0] == 0:
+        X_val = X_tr[-1:].copy()
+
     cv_results = []
     for lam0 in config['lambda0_list']:
         for lam2 in config['lambda2_list']:
-            fold_best_srs = []
-            for tr_idx, val_idx in kf.split(X_train):
-                X_tr = X_train[tr_idx]
-                X_val = X_train[val_idx]
-                solutions = solve_sparse_sdf_via_lars_positive(
-                    X_tr, lam0, lam2, config['kmin'], config['kmax'], depth_weights
-                )
-                if not solutions:
-                    continue
-                best_val_sr = -np.inf
-                for sol in solutions:
-                    w_full = np.zeros(X_tr.shape[1])
-                    w_full[sol['selected_indices']] = sol['selected_weights']
-                    val_sr = evaluate_portfolio(X_val, w_full)
-                    if val_sr > best_val_sr:
-                        best_val_sr = val_sr
-                if best_val_sr > -np.inf:
-                    fold_best_srs.append(best_val_sr)
-            if fold_best_srs:
-                cv_results.append({'lam0': lam0, 'lam2': lam2, 'avg_cv_sr': np.mean(fold_best_srs)})
+            solutions = solve_sparse_sdf_via_lars_positive(
+                X_tr, lam0, lam2, config['kmin'], config['kmax'], depth_weights
+            )
+            if not solutions:
+                continue
+            best_val_sr = -np.inf
+            for sol in solutions:
+                w_full = np.zeros(X_tr.shape[1])
+                w_full[sol['selected_indices']] = sol['selected_weights']
+                val_sr = evaluate_portfolio(X_val, w_full)
+                if val_sr > best_val_sr:
+                    best_val_sr = val_sr
+            if best_val_sr > -np.inf:
+                cv_results.append({
+                    'lam0': lam0,
+                    'lam2': lam2,
+                    'val_sr': best_val_sr,
+                })
+
     if not cv_results:
         best_lam0, best_lam2 = 0.2, 0.001
-        best_cv_sr = 0.0
+        best_val_sr = 0.0
     else:
-        best = max(cv_results, key=lambda x: x['avg_cv_sr'])
+        best = max(cv_results, key=lambda x: x['val_sr'])
         best_lam0, best_lam2 = best['lam0'], best['lam2']
-        best_cv_sr = best['avg_cv_sr']
-        print(f"    Optimal: λ0={best_lam0}, λ2={best_lam2}, CV_SR={best_cv_sr:.4f}")
+        best_val_sr = best['val_sr']
+        print(f"    Optimal: λ0={best_lam0}, λ2={best_lam2}, Val SR={best_val_sr:.4f}")
+
     all_solutions = solve_sparse_sdf_via_lars_positive(
         X_train, best_lam0, best_lam2, config['kmin'], config['kmax'], depth_weights
     )
     if not all_solutions:
         return None
+
     best_solution = None
     best_train_sr = -np.inf
     best_w_full = None
@@ -207,28 +217,60 @@ def prune_single_section(df, section_name, config):
             best_train_sr = tr_sr
             best_solution = sol
             best_w_full = w_full
+
     if best_solution is None:
         return None
+
     final_weights = best_w_full
     selected_K = best_solution['K']
+
+    # ---- test-set metrics ---------------------------------------------
     if len(X_test) > 0:
-        test_sr = evaluate_portfolio(X_test, final_weights)
-        test_returns = X_test @ final_weights
+        test_excess_series = X_test @ final_weights
         test_dates = df.index[test_mask]
-        test_returns_series = pd.Series(test_returns, index=test_dates, name='excess_return')
+
+        # Monthly Sharpe
+        test_sr_monthly = evaluate_portfolio(X_test, final_weights)
+
+        # Monthly average excess return
+        monthly_avg_excess = np.mean(test_excess_series)
+
+        # Maximum drawdown (based on cumulative returns)
+        cum_ret = (1 + test_excess_series).cumprod()
+        running_max = np.maximum.accumulate(cum_ret)
+        drawdown = (cum_ret - running_max) / running_max
+        max_drawdown = drawdown.min()
+
+        # Annualised Sharpe
+        annualised_sharpe = test_sr_monthly * np.sqrt(12) if not np.isnan(test_sr_monthly) else np.nan
+
+        # Test excess return series
+        test_returns_series = pd.Series(test_excess_series, index=test_dates, name=section_name)
     else:
-        test_sr = np.nan
+        test_sr_monthly = np.nan
+        monthly_avg_excess = np.nan
+        max_drawdown = np.nan
+        annualised_sharpe = np.nan
         test_returns_series = pd.Series(dtype=float)
+
     selected_nodes = []
     for i, w in enumerate(final_weights):
         if w > 1e-8:
             selected_nodes.append({'node_name': node_names[i], 'weight': w})
-    print(f"    Done: {len(node_names)} → {selected_K} portfolios, test Sharpe={test_sr:.4f}")
+    selected_K = len(selected_nodes)
+
+    print(f"    Done: {len(node_names)} → {selected_K} portfolios, "
+          f"test monthly Sharpe = {test_sr_monthly:.4f}" if not np.isnan(test_sr_monthly)
+          else "    Test Sharpe: no data")
+
     return {
         'section_name': section_name,
         'train_sharpe': best_train_sr,
-        'test_sharpe': test_sr,
-        'cv_sharpe': best_cv_sr,
+        'val_sharpe': best_val_sr,
+        'test_sharpe_monthly': test_sr_monthly,
+        'monthly_avg_excess_return': monthly_avg_excess,
+        'max_drawdown': max_drawdown,
+        'annualised_sharpe': annualised_sharpe,
         'best_lam0': best_lam0,
         'best_lam2': best_lam2,
         'n_assets': len(node_names),
@@ -239,38 +281,103 @@ def prune_single_section(df, section_name, config):
 
 if __name__ == "__main__":
     print("=" * 120)
-    print("=== TripleSort128 (cleaned sample) - Long-only pruning (max 5 assets) ===")
+    print("=== TripleSort128 (cleaned sample) - Long-only pruning with fixed time-series validation (max 5 assets) ===")
+    print(f"Training end: {CONFIG['train_end_date']}, Test start: {CONFIG['test_start_date']}")
+    print("=== Fixed train/valid split (2:1), output monthly avg excess, max DD, annual SR ===")
     print("=" * 120)
+
     triplesort_dir = Path(CONFIG['triplesort_dir'])
     if not triplesort_dir.exists():
         print(f"Error: candidate pool not found: {triplesort_dir}")
         sys.exit(1)
+
     output_dir = Path(CONFIG['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
+
     section_dfs = {}
     for file in sorted(triplesort_dir.glob("Sec*_triplesort.csv")):
         df = pd.read_csv(file, index_col=0, parse_dates=True)
         section_dfs[file.stem] = df
         print(f"Loaded: {file.name} ({df.shape[1]} portfolios)")
+
+    print(f"\nLoaded {len(section_dfs)} cross-sections, starting pruning...\n")
+
     all_results = []
     for sec_name, df in section_dfs.items():
         result = prune_single_section(df, sec_name, CONFIG)
         if result:
             all_results.append(result)
+
+    print(f"\nSuccessfully processed {len(all_results)} cross-sections")
+
     if all_results:
         summary_df = pd.DataFrame([{
             'Section': r['section_name'],
-            'Original': r['n_assets'],
-            'Selected': r['selected_K'],
-            'Train_SR': r['train_sharpe'],
-            'Test_SR': r['test_sharpe'],
-            'CV_SR': r['cv_sharpe'],
+            'Original_Portfolios': r['n_assets'],
+            'Selected_Portfolios': r['selected_K'],
+            'Compression_Ratio': f"{r['selected_K']/r['n_assets']*100:.1f}%",
+            'Train_Sharpe': f"{r['train_sharpe']:.4f}",
+            'Val_Sharpe': f"{r['val_sharpe']:.4f}",
+            'Test_Monthly_Sharpe': f"{r['test_sharpe_monthly']:.4f}",
+            'Monthly_Avg_Excess_Return': f"{r['monthly_avg_excess_return']:.6f}",
+            'Max_Drawdown': f"{r['max_drawdown']*100:.2f}%" if not np.isnan(r['max_drawdown']) else "NaN",
+            'Annualised_Sharpe': f"{r['annualised_sharpe']:.4f}",
             'Best_λ0': r['best_lam0'],
-            'Best_λ2': r['best_lam2']
+            'Best_λ2': r['best_lam2'],
         } for r in all_results])
-        summary_df.to_csv(output_dir / "Summary_TripleSort128_longonly.csv", index=False)
+        summary_path = output_dir / "Summary_TripleSort128_longonly.csv"
+        summary_df.to_csv(summary_path, index=False, encoding='utf-8-sig')
+        print(f"\nSummary saved: {summary_path}")
+
+        # Detailed node output
+        detailed_rows = []
+        for r in all_results:
+            detailed_rows.append({
+                'Section': r['section_name'],
+                'Type': 'Section Info',
+                'Portfolio_Name': '',
+                'Weight': '',
+                'Train_Sharpe': f"{r['train_sharpe']:.4f}",
+                'Val_Sharpe': f"{r['val_sharpe']:.4f}",
+                'Test_Monthly_Sharpe': f"{r['test_sharpe_monthly']:.4f}",
+                'Annualised_Sharpe': f"{r['annualised_sharpe']:.4f}",
+                'Monthly_Avg_Excess_Return': f"{r['monthly_avg_excess_return']:.6f}",
+                'Max_Drawdown': f"{r['max_drawdown']*100:.2f}%" if not np.isnan(r['max_drawdown']) else "NaN",
+                'Best_λ0': r['best_lam0'],
+                'Best_λ2': r['best_lam2'],
+                'Original_Portfolios': r['n_assets'],
+                'Selected_Portfolios': r['selected_K']
+            })
+            for node in r['selected_nodes']:
+                detailed_rows.append({
+                    'Section': r['section_name'],
+                    'Type': 'Selected Node',
+                    'Portfolio_Name': node['node_name'],
+                    'Weight': f"{node['weight']:.6f}",
+                    'Train_Sharpe': '',
+                    'Val_Sharpe': '',
+                    'Test_Monthly_Sharpe': '',
+                    'Annualised_Sharpe': '',
+                    'Monthly_Avg_Excess_Return': '',
+                    'Max_Drawdown': '',
+                    'Best_λ0': '',
+                    'Best_λ2': '',
+                    'Original_Portfolios': '',
+                    'Selected_Portfolios': ''
+                })
+        detailed_df = pd.DataFrame(detailed_rows)
+        detailed_path = output_dir / "Detailed_TripleSort128_longonly.csv"
+        detailed_df.to_csv(detailed_path, index=False, encoding='utf-8-sig')
+        print(f"Detailed results saved: {detailed_path}")
+
+        # Test excess return series
         test_returns_dict = {r['section_name']: r['test_returns'] for r in all_results if not r['test_returns'].empty}
         if test_returns_dict:
-            pd.concat(test_returns_dict, axis=1).to_csv(output_dir / "Test_Excess_Returns_TripleSort128_longonly.csv")
-        print("Results saved.")
-    print("Done.")
+            test_returns_df = pd.concat(test_returns_dict, axis=1)
+            test_returns_path = output_dir / "Test_Excess_Returns_TripleSort128_longonly.csv"
+            test_returns_df.to_csv(test_returns_path, encoding='utf-8-sig')
+            print(f"Test excess return series saved: {test_returns_path}")
+
+    print("\n" + "=" * 120)
+    print("Processing completed!")
+    print("=" * 120)
