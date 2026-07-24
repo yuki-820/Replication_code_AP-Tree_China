@@ -1,8 +1,9 @@
 """
-Turnover analysis for cleaned sample (bottom 30% market cap filtered monthly).
+Turnover analysis for cleaned sample (bottom 30% market cap filtered monthly) with multiple depth‑weight schemes.
 Computes stock mapping tables and portfolio weights for selected nodes/portfolios
-from AP-Tree (cleaned, K=20 & K=40) and TripleSort128 (cleaned) strategies.
-Outputs average monthly one-way turnover per section.
+from AP‑Tree (cleaned, K=20 & K=40) and TripleSort128 (cleaned) strategies,
+now supporting multiple weight schemes (e.g., dw_power0.5, dw_power2.0).
+Outputs average monthly one‑way turnover per section × weight scheme.
 """
 
 import pandas as pd
@@ -25,7 +26,7 @@ CONFIG = {
     'TRIPLE_MAP_DIR': str(PROJECT_ROOT / 'output' / 'stock_mappings' / 'Triple128_cleaned'),
     'WEIGHTS_OUTPUT_DIR': str(PROJECT_ROOT / 'output' / 'stock_weights_cleaned'),
 
-    # Weight files from cleaned sample pruning (must exist)
+    # Weight files from cleaned sample pruning (now contain Weight_Scheme column)
     'AP_WEIGHT_FILE_K20': str(PROJECT_ROOT / 'output' / 'pruned' / 'AP-Tree_cleaned' / 'All_Sections_Detailed_Results_kmax20.csv'),
     'AP_WEIGHT_FILE_K40': str(PROJECT_ROOT / 'output' / 'pruned' / 'AP-Tree_cleaned' / 'All_Sections_Detailed_Results_kmax40.csv'),
     'TRIPLE_WEIGHT_FILE': str(PROJECT_ROOT / 'output' / 'pruned' / 'TripleSort128_cleaned' / 'All_TripleSort_Detailed_Results.csv'),
@@ -101,7 +102,7 @@ def get_stock_id(df):
     else:
         raise KeyError("No valid stock id column")
 
-# ==================== AP-Tree mapping generation ====================
+# ==================== AP-Tree mapping generation (unchanged, merges all schemes) ====================
 def split_node_np(df_arr, feature_idx, q_num):
     feat_vals = df_arr[:, feature_idx]
     groups = ntile_array(feat_vals, q_num)
@@ -142,7 +143,7 @@ def build_ap_mapping_for_month(df_arr, stock_ids, feat_list, depth, q_num, secti
                     stack.append((child_global_mask, cur_depth + 1, child_path))
 
 def generate_ap_mappings(config):
-    print("\n=== Phase 1: Generate AP-Tree stock mappings (cleaned sample) ===")
+    print("\n=== Phase 1: Generate AP-Tree stock mappings (cleaned sample, all schemes merged) ===")
     other_feats = config['OTHER_FEATURES']
     combo_size = config['TREE_DEPTH'] - 2
     all_combos = list(combinations(other_feats, combo_size))
@@ -150,7 +151,7 @@ def generate_ap_mappings(config):
     map_dir = Path(config['AP_MAP_DIR'])
     map_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect selected nodes from both K=20 and K=40 pruning results
+    # Collect selected nodes from both K=20 and K=40 pruning results (all weight schemes)
     selected_per_section = {}
     for wf_key, wf in [('AP20', config['AP_WEIGHT_FILE_K20']), ('AP40', config['AP_WEIGHT_FILE_K40'])]:
         if not Path(wf).exists():
@@ -194,7 +195,8 @@ def generate_ap_mappings(config):
             file_path = data_folder / f"{year}.csv"
             if not file_path.exists():
                 continue
-            df = pd.read_csv(file_path, low_memory=False)
+            df = pd.read_csv(file_path, low_memory=False,
+                 dtype={'上市公司代码_Comcd': str, '股票代码_Stkcd': str})
             df.rename(columns=COLUMN_MAP, inplace=True)
             if 'date' not in df.columns:
                 continue
@@ -239,7 +241,7 @@ def generate_ap_mappings(config):
         else:
             print(f"    No data for {section_name}")
 
-# ==================== TripleSort mapping generation ====================
+# ==================== TripleSort mapping generation (unchanged) ====================
 def generate_triple_mappings(config):
     print("\n=== Phase 1: Generate TripleSort128 stock mappings (cleaned sample) ===")
     other_feats = config['OTHER_FEATURES']
@@ -290,7 +292,8 @@ def generate_triple_mappings(config):
             file_path = data_folder / f"{year}.csv"
             if not file_path.exists():
                 continue
-            df = pd.read_csv(file_path, low_memory=False)
+            df = pd.read_csv(file_path, low_memory=False,
+                             dtype={'上市公司代码_Comcd': str, '股票代码_Stkcd': str})
             df.rename(columns=COLUMN_MAP, inplace=True)
             if 'date' not in df.columns:
                 continue
@@ -349,22 +352,33 @@ def generate_triple_mappings(config):
         else:
             print(f"    No data for {section_name}")
 
-# ==================== Weight table & turnover calculation ====================
-def read_node_weights_ap(weight_file_path, section_name):
+# ==================== Weight table & turnover calculation (updated for schemes) ====================
+def read_node_weights_ap(weight_file_path, section_name, scheme=None):
+    """Read node weights for AP-Tree, optionally filtered by weight scheme."""
     df = pd.read_csv(weight_file_path)
+    # Detect columns
     if 'Type' in df.columns:
         type_col = 'Type'
         sec_col = 'Section' if 'Section' in df.columns else '截面名称'
         node_col = 'Node_Name' if 'Node_Name' in df.columns else '节点名称'
         weight_col = 'Weight' if 'Weight' in df.columns else '权重'
+        scheme_col = 'Weight_Scheme' if 'Weight_Scheme' in df.columns else None
     else:
         type_col = '类型'
         sec_col = '截面名称'
         node_col = '节点名称'
         weight_col = '权重'
+        scheme_col = None
     df_nodes = df[df[type_col] == 'Selected Node']
     if df_nodes.empty:
         df_nodes = df[df[type_col] == '选中节点']
+    # Filter by scheme if requested
+    if scheme is not None and scheme_col is not None and scheme_col in df_nodes.columns:
+        df_nodes = df_nodes[df_nodes[scheme_col] == scheme]
+    elif scheme is not None and (scheme_col is None or scheme_col not in df_nodes.columns):
+        # If a scheme is required but file has no scheme column, return empty
+        print(f"  Warning: weight file does not contain Weight_Scheme column, cannot filter scheme {scheme}")
+        return {}
     sec_df = df_nodes[df_nodes[sec_col] == section_name]
     weights = {}
     for _, row in sec_df.iterrows():
@@ -372,6 +386,7 @@ def read_node_weights_ap(weight_file_path, section_name):
     return weights
 
 def read_combo_weights_triple(weight_file_path, section_name):
+    """Read portfolio weights for TripleSort128 (no weight scheme)."""
     df = pd.read_csv(weight_file_path)
     if 'Type' in df.columns:
         type_col = 'Type'
@@ -438,7 +453,7 @@ def compute_turnover(weights_df):
     return total / n_months if n_months > 0 else np.nan
 
 def generate_all_weights(config):
-    print("\n=== Phase 2: Build weight tables and compute turnover (cleaned sample) ===")
+    print("\n=== Phase 2: Build weight tables and compute turnover (cleaned sample, per weight scheme) ===")
     out_dir = Path(config['WEIGHTS_OUTPUT_DIR'])
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -448,6 +463,34 @@ def generate_all_weights(config):
     combo_size = 2
     all_combos = list(combinations(other_feats, combo_size))
 
+    # Pre-read weight files to detect available weight schemes
+    ap20_file = config['AP_WEIGHT_FILE_K20']
+    ap40_file = config['AP_WEIGHT_FILE_K40']
+    ap20_df = pd.read_csv(ap20_file) if Path(ap20_file).exists() else None
+    ap40_df = pd.read_csv(ap40_file) if Path(ap40_file).exists() else None
+
+    def get_schemes(df):
+        if df is not None:
+            # Try both possible column names
+            for col in ['Weight_Scheme', '权重方案']:
+                if col in df.columns:
+                    schemes = df[col].dropna().unique().tolist()
+                    # Only include typical schemes like dw_power*
+                    return [s for s in schemes if isinstance(s, str) and 'dw_power' in s]
+        return []
+
+    ap20_schemes = get_schemes(ap20_df)
+    ap40_schemes = get_schemes(ap40_df)
+
+    # If no scheme detected, use a single None to maintain backward compatibility
+    if not ap20_schemes:
+        ap20_schemes = [None]
+    if not ap40_schemes:
+        ap40_schemes = [None]
+
+    print(f"Detected schemes for AP20: {ap20_schemes}")
+    print(f"Detected schemes for AP40: {ap40_schemes}")
+
     turnover_records = []
 
     for sec_id in config['SECTION_IDS']:
@@ -456,57 +499,61 @@ def generate_all_weights(config):
         section_name = f"Sec{sec_id:02d}_{'_'.join(feat_list)}"
         print(f"\nProcessing section: {section_name}")
 
-        # AP K=20 cleaned
+        # AP K=20 cleaned (all schemes)
         if config['RUN_AP20']:
-            wf = config['AP_WEIGHT_FILE_K20']
-            if Path(wf).exists():
-                weights = read_node_weights_ap(wf, section_name)
-                if weights:
-                    df_w = build_weights_table('AP', section_name, config['AP_MAP_DIR'],
-                                                weights, test_start, test_end)
-                    if df_w is not None:
-                        out_path = out_dir / f"AP20_cleaned_{section_name}_weights.csv"
-                        df_w.to_csv(out_path, float_format='%.10f')
-                        print(f"  ✓ AP20: {df_w.shape[0]} stocks × {df_w.shape[1]} months")
-                        avg_turn = compute_turnover(df_w)
-                        turnover_records.append({
-                            'Model': 'AP20_cleaned',
-                            'Section': section_name,
-                            'Average_Monthly_Turnover': avg_turn
-                        })
+            if Path(ap20_file).exists():
+                for scheme in ap20_schemes:
+                    weights = read_node_weights_ap(ap20_file, section_name, scheme)
+                    if weights:
+                        df_w = build_weights_table('AP', section_name, config['AP_MAP_DIR'],
+                                                    weights, test_start, test_end)
+                        if df_w is not None:
+                            scheme_suffix = f"_{scheme}" if scheme else ""
+                            out_path = out_dir / f"AP20_cleaned_{section_name}{scheme_suffix}_weights.csv"
+                            df_w.to_csv(out_path, float_format='%.10f')
+                            print(f"  ✓ AP20 ({scheme}): {df_w.shape[0]} stocks × {df_w.shape[1]} months")
+                            avg_turn = compute_turnover(df_w)
+                            turnover_records.append({
+                                'Model': 'AP20_cleaned',
+                                'Section': section_name,
+                                'Weight_Scheme': scheme if scheme else 'none',
+                                'Average_Monthly_Turnover': avg_turn
+                            })
+                        else:
+                            print(f"  ⚠ AP20 ({scheme}): no weight table")
                     else:
-                        print(f"  ⚠ AP20: no weight table")
-                else:
-                    print(f"  ⚠ AP20: no selected nodes")
+                        print(f"  ⚠ AP20 ({scheme}): no selected nodes")
             else:
                 print(f"  ✗ AP20 weight file missing")
 
-        # AP K=40 cleaned
+        # AP K=40 cleaned (all schemes)
         if config['RUN_AP40']:
-            wf = config['AP_WEIGHT_FILE_K40']
-            if Path(wf).exists():
-                weights = read_node_weights_ap(wf, section_name)
-                if weights:
-                    df_w = build_weights_table('AP', section_name, config['AP_MAP_DIR'],
-                                                weights, test_start, test_end)
-                    if df_w is not None:
-                        out_path = out_dir / f"AP40_cleaned_{section_name}_weights.csv"
-                        df_w.to_csv(out_path, float_format='%.10f')
-                        print(f"  ✓ AP40: {df_w.shape[0]} stocks × {df_w.shape[1]} months")
-                        avg_turn = compute_turnover(df_w)
-                        turnover_records.append({
-                            'Model': 'AP40_cleaned',
-                            'Section': section_name,
-                            'Average_Monthly_Turnover': avg_turn
-                        })
+            if Path(ap40_file).exists():
+                for scheme in ap40_schemes:
+                    weights = read_node_weights_ap(ap40_file, section_name, scheme)
+                    if weights:
+                        df_w = build_weights_table('AP', section_name, config['AP_MAP_DIR'],
+                                                    weights, test_start, test_end)
+                        if df_w is not None:
+                            scheme_suffix = f"_{scheme}" if scheme else ""
+                            out_path = out_dir / f"AP40_cleaned_{section_name}{scheme_suffix}_weights.csv"
+                            df_w.to_csv(out_path, float_format='%.10f')
+                            print(f"  ✓ AP40 ({scheme}): {df_w.shape[0]} stocks × {df_w.shape[1]} months")
+                            avg_turn = compute_turnover(df_w)
+                            turnover_records.append({
+                                'Model': 'AP40_cleaned',
+                                'Section': section_name,
+                                'Weight_Scheme': scheme if scheme else 'none',
+                                'Average_Monthly_Turnover': avg_turn
+                            })
+                        else:
+                            print(f"  ⚠ AP40 ({scheme}): no weight table")
                     else:
-                        print(f"  ⚠ AP40: no weight table")
-                else:
-                    print(f"  ⚠ AP40: no selected nodes")
+                        print(f"  ⚠ AP40 ({scheme}): no selected nodes")
             else:
                 print(f"  ✗ AP40 weight file missing")
 
-        # TripleSort128 cleaned
+        # TripleSort128 cleaned (no weight schemes)
         if config['RUN_TRIPLE']:
             wf = config['TRIPLE_WEIGHT_FILE']
             if Path(wf).exists():
@@ -522,6 +569,7 @@ def generate_all_weights(config):
                         turnover_records.append({
                             'Model': 'Triple128_cleaned',
                             'Section': section_name,
+                            'Weight_Scheme': 'none',
                             'Average_Monthly_Turnover': avg_turn
                         })
                     else:
@@ -542,7 +590,7 @@ def generate_all_weights(config):
 # ==================== Main ====================
 if __name__ == "__main__":
     print("=" * 80)
-    print("Turnover Analysis for Cleaned Sample (bottom 30% filtered)")
+    print("Turnover Analysis for Cleaned Sample (bottom 30% filtered) with multiple depth‑weight schemes")
     print("=" * 80)
 
     start_time = time.time()
