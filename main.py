@@ -52,7 +52,7 @@ def run_script(script_path, description):
 
 def main():
     print("=" * 80)
-    print("Replication Pipeline for Asset Pricing with ML")
+    print("Replication Pipeline for AP-Tree in China")
     print("=" * 80)
 
     # Step 1: Data process (commented out – assume data already prepared)
