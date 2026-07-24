@@ -432,10 +432,15 @@ def build_weights_table(model_type, section_name, map_dir, weight_dict, test_sta
     if df_test.empty:
         return None
     df_test['config_weight'] = df_test[group_col].map(weight_dict)
+    # === 替换为 ===
     df_test['raw_weight'] = df_test['weight_in_group'] * df_test['config_weight']
-    # No additional normalization
-    pivot = df_test.pivot_table(index='stock_id', columns='date', values='raw_weight',
-                                aggfunc='sum', fill_value=0.0)
+
+    # Monthly absolute-value normalization (long-short portfolio: total absolute weight = 1)
+    abs_sum = df_test.groupby('date')['raw_weight'].transform(lambda x: x.abs().sum())
+    df_test['final_weight'] = df_test['raw_weight'] / abs_sum.replace(0, np.nan)
+    df_test['final_weight'] = df_test['final_weight'].fillna(0.0)   # If total absolute weight is 0, keep weights as 0
+    pivot = df_test.pivot_table(index='stock_id', columns='date', values='final_weight',
+                            aggfunc='sum', fill_value=0.0)
     pivot = pivot.reindex(sorted(pivot.columns), axis=1)
     pivot = pivot.astype(float)
     return pivot
