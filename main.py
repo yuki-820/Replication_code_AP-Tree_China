@@ -9,7 +9,8 @@ Steps:
 2. Build candidate pools for all models (run build_pool.py in each model subfolder).
 3. Prune all models (run prune.py in each model subfolder).
 4. Run factor model tests (step4_factor_tests.py).
-5. Run turnover analysis (step5_turnover.py).
+5. Run plotting (step5_plot.py).
+6. Run turnover analysis (step6_turnover.py).
 
 Usage:
     python main.py
@@ -54,19 +55,19 @@ def main():
     print("Replication Pipeline for Asset Pricing with ML")
     print("=" * 80)
 
-    # Step 1: Data process
+    # Step 1: Data process (commented out – assume data already prepared)
     data_process = CODE_DIR / "step1_data_process.py"
     if data_process.exists():
         run_script(data_process, "Data process (step1)")
     else:
         print("Step 1 skipped: step1_data_process.py not found. Assuming data already prepared.")
 
-    # Step 2: Build candidate pools for each model
+    # Step 2: Build candidate pools (commented out – assume pools already built)
     print("\n" + "=" * 80)
     print("Step 2: Build candidate pools")
     print("=" * 80)
     for model_dir in MODEL_DIRS:
-        build_script = CODE_DIR / model_dir / "build_pool.py"   # corrected name (was build_pools.py)
+        build_script = CODE_DIR / model_dir / "build_pool.py"
         if build_script.exists():
             run_script(build_script, f"Build pools for {model_dir}")
         else:
@@ -89,19 +90,29 @@ def main():
     print("=" * 80)
     factor_script = CODE_DIR / "step4_factor_tests.py"
     if factor_script.exists():
-        run_script(factor_script, "Factor model tests (step3)")
+        run_script(factor_script, "Factor model tests (step4)")
     else:
         print("Error: step4_factor_tests.py not found. Skipping factor tests.")
 
-    # Step 5: Turnover analysis
+    # Step 5: Plotting
     print("\n" + "=" * 80)
-    print("Step 5: Turnover analysis")
+    print("Step 5: Plotting (figures)")
     print("=" * 80)
-    turnover_script = CODE_DIR / "step5_turnover.py"
-    if turnover_script.exists():
-        run_script(turnover_script, "Turnover analysis (step5)")
+    plot_script = CODE_DIR / "step5_plot.py"
+    if plot_script.exists():
+        run_script(plot_script, "Plotting (step5)")
     else:
-        print("Warning: step5_turnover.py not found. Skipping turnover analysis.")
+        print("Warning: step5_plot.py not found. Skipping plotting.")
+
+    # Step 6: Turnover analysis
+    print("\n" + "=" * 80)
+    print("Step 6: Turnover analysis")
+    print("=" * 80)
+    turnover_script = CODE_DIR / "step6_turnover.py"
+    if turnover_script.exists():
+        run_script(turnover_script, "Turnover analysis (step6)")
+    else:
+        print("Warning: step6_turnover.py not found. Skipping turnover analysis.")
 
     print("\n" + "=" * 80)
     print("All steps completed successfully.")
