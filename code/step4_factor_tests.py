@@ -1,519 +1,1600 @@
 """
-Comprehensive factor model testing – revised output logic:
-- Only portfolios with significant alpha (p<0.05) in ALL FIVE factor models are kept.
-- Top 10 by test monthly Sharpe for each strategy-weight scheme.
-- Separate GRS tables for full/cleaned samples.
-- Long-only table: 36 sections × 3 strategies (missing if not significant in any model).
-- Combined large table with all significant results.
+Factor-model tests and paper-ready result tables for pruned Section-SDF returns.
+
+Main outputs
+------------
+1. All_Regression_Results.csv
+   Compact long-format audit table for every Section-SDF x factor model.
+
+2. All_Section_SDF_Results_Wide.csv
+   Main wide-format result table with performance metrics, best pruning
+   hyperparameters, factor-model alpha, time-series R2, and cleaned-sample XS-R².
+
+3. Top10_AllModelsSignificant_Full.csv
+4. Top10_AllModelsSignificant_Cleaned.csv
+   Full and cleaned samples are ranked independently.
+
+5. XS_R²_Cleaned_Sample.csv
+   XS-R² for all cleaned-sample strategies, including TripleSort64_clean.
+
+6. LongOnly_Sharpe_Summary.csv
+   Long-only strategies: performance summary only; no factor regressions.
+
+7. Top_SDF_Weight_Distributions.csv
+   Selected-node weights for:
+     - top 3 Full-sample SDFs by monthly out-of-sample Sharpe;
+     - top 6 Cleaned-sample SDFs by monthly out-of-sample Sharpe.
+
+8. Factor_Test_Run_Manifest.csv
 """
 
-import pandas as pd
-import numpy as np
-from pathlib import Path
-import statsmodels.api as sm
-from scipy.stats import f as f_dist
-import warnings
+from __future__ import annotations
+
 import re
+import warnings
+from pathlib import Path
 
-warnings.filterwarnings('ignore')
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
 
-# ==================== Configuration (same as before) ====================
+warnings.filterwarnings("ignore")
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
 CONFIG = {
-    'factor_dir': str(PROJECT_ROOT / 'data' / 'factors'),
-    'output_dir': str(PROJECT_ROOT / 'output' / 'tables'),
-    'models': {
-        'CH3': {'file': 'CH3_factors_monthly_202602.xlsx', 'sheet': 'Returnseries',
-                'mapping': {'mktrf': 'Mkt-RF', 'SMB': 'SMB', 'VMG': 'VMG'}},
-        'CH4': {'file': 'CH4_factors_monthly_202602.xlsx', 'sheet': 'Returnseries',
-                'mapping': {'mktrf': 'Mkt-RF', 'SMB': 'SMB', 'VMG': 'VMG', 'PMO': 'PMO'}},
-        'FF5': {'file': 'fivefactor_monthly.csv', 'sheet': None,
-                'mapping': {'mkt_rf': 'Mkt-RF', 'smb': 'SMB', 'hml': 'HML', 'rmw': 'RMW', 'cma': 'CMA'}},
-        'FF6': {'file': 'fivefactor_monthly.csv', 'sheet': None,
-                'mapping': {'mkt_rf': 'Mkt-RF', 'smb': 'SMB', 'hml': 'HML', 'rmw': 'RMW', 'cma': 'CMA', 'umd': 'UMD'}},
-        'Carhart4': {'file': 'fivefactor_monthly.csv', 'sheet': None,
-                     'mapping': {'mkt_rf': 'Mkt-RF', 'smb': 'SMB', 'hml': 'HML', 'umd': 'UMD'}}
+    "factor_dir": PROJECT_ROOT / "data" / "factors",
+    "output_dir": PROJECT_ROOT / "output" / "tables",
+    "nw_lags": None,
+    "significance_level": 0.05,
+    "require_positive_alpha": False,
+    "top_n": 10,
+    "min_observations": 12,
+    "top_full_sdfs": 3,
+    "top_cleaned_sdfs": 6,
+    "models": {
+        "CH3": {
+            "file": "CH3_factors_monthly_202602.xlsx",
+            "sheet": "Returnseries",
+            "factors": {
+                "Mkt-RF": ["mktrf", "MKT_RF", "Mkt-RF"],
+                "SMB": ["SMB", "smb"],
+                "VMG": ["VMG", "vmg"],
+            },
+        },
+        "CH4": {
+            "file": "CH4_factors_monthly_202602.xlsx",
+            "sheet": "Returnseries",
+            "factors": {
+                "Mkt-RF": ["mktrf", "MKT_RF", "Mkt-RF"],
+                "SMB": ["SMB", "smb"],
+                "VMG": ["VMG", "vmg"],
+                "PMO": ["PMO", "pmo"],
+            },
+        },
+        "FF5": {
+            "file": "fivefactor_monthly.csv",
+            "sheet": None,
+            "factors": {
+                "Mkt-RF": ["mkt_rf", "MKT_RF", "Mkt-RF"],
+                "SMB": ["smb", "SMB"],
+                "HML": ["hml", "HML"],
+                "RMW": ["rmw", "RMW"],
+                "CMA": ["cma", "CMA"],
+            },
+        },
+        "FF6": {
+            "file": "fivefactor_monthly.csv",
+            "sheet": None,
+            "factors": {
+                "Mkt-RF": ["mkt_rf", "MKT_RF", "Mkt-RF"],
+                "SMB": ["smb", "SMB"],
+                "HML": ["hml", "HML"],
+                "RMW": ["rmw", "RMW"],
+                "CMA": ["cma", "CMA"],
+                "UMD": ["umd", "UMD", "mom", "MOM"],
+            },
+        },
+        "Carhart4": {
+            "file": "fivefactor_monthly.csv",
+            "sheet": None,
+            "factors": {
+                "Mkt-RF": ["mkt_rf", "MKT_RF", "Mkt-RF"],
+                "SMB": ["smb", "SMB"],
+                "HML": ["hml", "HML"],
+                "UMD": ["umd", "UMD", "mom", "MOM"],
+            },
+        },
+        "Q5": {
+            "file": "q5factor.csv",
+            "sheet": 0,
+            "factors": {
+                "Mkt-RF": ["RmRf"],
+                "ME": ["R_ME"],
+                "IA": ["R_IA"],
+                "ROE": ["R_ROE"],
+                "EG": ["EG_factor"],
+            },
+        },
     },
-    'strategies': {
-        'TripleSort64': 'output/pruned/TripleSort64_full/Test_Excess_Returns_TripleSort64.csv',
-        'APTree_K20': 'output/pruned/AP-Tree_full/Test_Excess_Returns_kmax20.csv',
-        'APTree_K40': 'output/pruned/AP-Tree_full/Test_Excess_Returns_kmax40.csv',
-        'TripleSort128_clean': 'output/pruned/TripleSort128_cleaned/Test_Excess_Returns_TripleSort128.csv',
-        'APTree_clean_K20': 'output/pruned/AP-Tree_cleaned/Test_Excess_Returns_kmax20.csv',
-        'APTree_clean_K40': 'output/pruned/AP-Tree_cleaned/Test_Excess_Returns_kmax40.csv',
-        'TripleSort128_longonly': 'output/pruned/TripleSort128_cleaned_longonly/Test_Excess_Returns_TripleSort128_longonly.csv',
-        'APTree_longonly_K5': 'output/pruned/AP-Tree_cleaned_longonly/Test_Excess_Returns_kmax5.csv',
+    "strategies": {
+        "TripleSort64": {
+            "sample": "Full",
+            "model_name": "TripleSort64",
+            "path": (
+                "output/pruned/TripleSort64_full/"
+                "Test_Excess_Returns_TripleSort64.csv"
+            ),
+            "detail_path": (
+                "output/pruned/TripleSort64_full/"
+                "All_TripleSort_Detailed_Results.csv"
+            ),
+        },
+        "APTree_K20": {
+            "sample": "Full",
+            "model_name": "AP-Tree",
+            "path": (
+                "output/pruned/AP-Tree_full/"
+                "Test_Excess_Returns_kmax20.csv"
+            ),
+            "detail_path": (
+                "output/pruned/AP-Tree_full/"
+                "All_Sections_Detailed_Results_kmax20.csv"
+            ),
+        },
+        "APTree_K40": {
+            "sample": "Full",
+            "model_name": "AP-Tree",
+            "path": (
+                "output/pruned/AP-Tree_full/"
+                "Test_Excess_Returns_kmax40.csv"
+            ),
+            "detail_path": (
+                "output/pruned/AP-Tree_full/"
+                "All_Sections_Detailed_Results_kmax40.csv"
+            ),
+        },
+        "TripleSort64_clean": {
+            "sample": "Cleaned",
+            "model_name": "TripleSort64",
+            "path": (
+                "output/pruned/TripleSort64_cleaned/"
+                "Test_Excess_Returns_TripleSort64.csv"
+            ),
+            "detail_path": (
+                "output/pruned/TripleSort64_cleaned/"
+                "All_TripleSort_Detailed_Results.csv"
+            ),
+            "selected_node_path": (
+                "output/pruned/TripleSort64_cleaned/"
+                "Selected_Node_Test_Excess_Returns_TripleSort64.csv"
+            ),
+            "selected_node_header_levels": 2,
+        },
+        "APTree_clean_K20": {
+            "sample": "Cleaned",
+            "model_name": "AP-Tree",
+            "path": (
+                "output/pruned/AP-Tree_cleaned/"
+                "Test_Excess_Returns_kmax20.csv"
+            ),
+            "detail_path": (
+                "output/pruned/AP-Tree_cleaned/"
+                "All_Sections_Detailed_Results_kmax20.csv"
+            ),
+            "selected_node_path": (
+                "output/pruned/AP-Tree_cleaned/"
+                "Selected_Node_Test_Excess_Returns_kmax20.csv"
+            ),
+            "selected_node_header_levels": 3,
+        },
+        "APTree_clean_K40": {
+            "sample": "Cleaned",
+            "model_name": "AP-Tree",
+            "path": (
+                "output/pruned/AP-Tree_cleaned/"
+                "Test_Excess_Returns_kmax40.csv"
+            ),
+            "detail_path": (
+                "output/pruned/AP-Tree_cleaned/"
+                "All_Sections_Detailed_Results_kmax40.csv"
+            ),
+            "selected_node_path": (
+                "output/pruned/AP-Tree_cleaned/"
+                "Selected_Node_Test_Excess_Returns_kmax40.csv"
+            ),
+            "selected_node_header_levels": 3,
+        },
+        "TripleSort64_longonly": {
+            "sample": "LongOnly",
+            "model_name": "TripleSort64",
+            "path": (
+                "output/pruned/TripleSort64_cleaned_longonly/"
+                "Test_Excess_Returns_TripleSort64_longonly.csv"
+            ),
+        },
+        "APTree_longonly_K5": {
+            "sample": "LongOnly",
+            "model_name": "AP-Tree",
+            "path": (
+                "output/pruned/AP-Tree_cleaned_longonly/"
+                "Test_Excess_Returns_kmax5.csv"
+            ),
+        },
     },
-    'nw_lags': None,
-    'significance_level': 0.05,
 }
 
 FEATURE_MAP = {
-    'mkt_cap': 'LME', 'turnover': 'Lturnover', 'st_rev': 'ST_Rev',
-    'r12_2': 'r12_2', 'lt_rev': 'LT_Rev', 'idio_vol': 'IdioVol',
-    'fin_investment': 'Fin_Investment', 'fin_op': 'Fin_OP',
-    'fin_ac': 'Fin_AC', 'beme': 'BEME'
+    "mkt_cap": "LME",
+    "turnover": "Lturnover",
+    "st_rev": "ST_Rev",
+    "r12_2": "r12_2",
+    "lt_rev": "LT_Rev",
+    "idio_vol": "IdioVol",
+    "fin_investment": "Fin_Investment",
+    "fin_op": "Fin_OP",
+    "fin_ac": "Fin_AC",
+    "beme": "BEME",
 }
 
-# ---------- helper functions (unchanged except load_summary_metrics) ----------
-def load_factors(model_name):
-    cfg = CONFIG['models'][model_name]
-    file_path = Path(CONFIG['factor_dir']) / cfg['file']
-    if cfg['file'].endswith('.csv'):
-        df = pd.read_csv(file_path)
+PERFORMANCE_COLUMNS = [
+    "Annualized_Sharpe",
+    "Monthly_Sharpe",
+    "Max_Drawdown",
+    "Monthly_Avg_Excess_Return",
+]
+
+IDENTIFIER_COLUMNS = [
+    "Sample",
+    "Strategy",
+    "Model_Name",
+    "Weight_Scheme",
+    "Section_SDF",
+    "Section",
+    "Feature",
+]
+
+# =============================================================================
+# Generic helpers
+# =============================================================================
+
+def write_csv(df: pd.DataFrame, filename: str) -> None:
+    """Write CSV using UTF-8 with BOM for spreadsheet compatibility."""
+    output_path = Path(CONFIG["output_dir"]) / filename
+    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"Saved: {output_path}")
+
+def find_column(columns: pd.Index, aliases: list[str]) -> str | None:
+    """Find a column using case-insensitive exact aliases."""
+    lookup = {str(column).strip().lower(): column for column in columns}
+
+    for alias in aliases:
+        matched = lookup.get(str(alias).strip().lower())
+        if matched is not None:
+            return matched
+
+    return None
+
+def parse_float(value: object) -> float:
+    """Convert ordinary numeric or percentage-like text values to float."""
+    if pd.isna(value):
+        return np.nan
+
+    if isinstance(value, str):
+        value = value.strip().replace(",", "")
+        if not value:
+            return np.nan
+        if value.endswith("%"):
+            return pd.to_numeric(value[:-1], errors="coerce") / 100.0
+
+    return pd.to_numeric(value, errors="coerce")
+
+def parse_factor_dates(values: pd.Series, date_column: str) -> pd.Series:
+    """Parse YYYYMMDD, YYYYMM, Excel-like, and ordinary date representations."""
+    text = values.astype(str).str.replace(r"\.0$", "", regex=True)
+
+    if str(date_column).strip().lower() == "trdmn":
+        parsed = pd.to_datetime(text, format="%Y%m", errors="coerce")
     else:
-        df = pd.read_excel(file_path, sheet_name=cfg['sheet'])
-    date_col = None
-    for col in ['日期_Date', 'mnthdt', 'trdmn']:
-        if col in df.columns:
-            date_col = col
-            break
-    if date_col is None:
-        raise ValueError(f"Date column not found in {cfg['file']}")
-    if model_name in ['CH3', 'CH4']:
-        df[date_col] = pd.to_datetime(df[date_col].astype(str).str.replace('.0', ''), format='%Y%m%d', errors='coerce')
-    elif date_col == 'trdmn':
-        df[date_col] = pd.to_datetime(df[date_col].astype(str), format='%Y%m', errors='coerce')
+        parsed = pd.to_datetime(text, format="%Y%m%d", errors="coerce")
+        parsed = parsed.where(
+            parsed.notna(),
+            pd.to_datetime(values, errors="coerce"),
+        )
+        parsed = parsed.where(
+            parsed.notna(),
+            pd.to_datetime(text, format="%Y%m", errors="coerce"),
+        )
+
+    return parsed
+
+def load_factors(model_name: str) -> pd.DataFrame:
+    """Load one factor model and enforce its complete factor schema."""
+    cfg = CONFIG["models"][model_name]
+    file_path = Path(CONFIG["factor_dir"]) / cfg["file"]
+
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"{model_name}: factor file not found: {file_path}"
+        )
+
+    if file_path.suffix.lower() == ".csv":
+        raw = pd.read_csv(file_path)
     else:
-        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-    df = df.dropna(subset=[date_col])
-    df['year_month'] = df[date_col].dt.strftime('%Y-%m')
-    df = df.set_index('year_month')
-    available = [c for c in cfg['mapping'].keys() if c in df.columns]
-    df = df[available].rename(columns=cfg['mapping'])
-    df = df.astype(float).sort_index()
-    df = df[~df.index.duplicated(keep='first')]
+        raw = pd.read_excel(file_path, sheet_name=cfg["sheet"])
+
+    date_column = find_column(
+        raw.columns,
+        ["日期_Date", "mnthdt", "trdmn", "date", "Date", "month", "Month"],
+    )
+    if date_column is None:
+        raise ValueError(
+            f"{model_name}: date column not found in {file_path.name}. "
+            f"Available columns: {raw.columns.tolist()}"
+        )
+
+    selected_columns = {}
+    missing_factors = []
+
+    for canonical_name, aliases in cfg["factors"].items():
+        source_name = find_column(raw.columns, aliases)
+
+        if source_name is None:
+            missing_factors.append(
+                f"{canonical_name}: aliases={aliases}"
+            )
+        else:
+            selected_columns[canonical_name] = source_name
+
+    if missing_factors:
+        raise ValueError(
+            f"{model_name}: required factor columns are missing in "
+            f"{file_path.name}.\n"
+            f"Missing: {missing_factors}\n"
+            f"Available columns: {raw.columns.tolist()}"
+        )
+
+    df = raw[[date_column] + list(selected_columns.values())].copy()
+    df[date_column] = parse_factor_dates(df[date_column], str(date_column))
+    df = df.dropna(subset=[date_column])
+    df["year_month"] = df[date_column].dt.strftime("%Y-%m")
+    df = df.set_index("year_month")
+
+    df = df.rename(
+        columns={
+            source: canonical
+            for canonical, source in selected_columns.items()
+        }
+    )
+
+    df = df[list(cfg["factors"])].apply(pd.to_numeric, errors="coerce")
+    df = df[~df.index.duplicated(keep="first")].sort_index()
+
+    if df.empty:
+        raise ValueError(
+            f"{model_name}: no valid monthly factor observations after loading."
+        )
+
     return df
 
-def run_factor_regression(strategy_ret, factors, nw_lags=None):
-    merged = pd.concat([strategy_ret, factors], axis=1, join='inner').dropna()
-    if len(merged) < 12:
-        return None, None
-    y = merged.iloc[:, 0]
-    X = merged.iloc[:, 1:]
-    X = sm.add_constant(X)
+def normalize_monthly_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert a date-like index to YYYY-MM, unique and sorted."""
+    index_dates = pd.to_datetime(df.index, errors="coerce")
+    valid = index_dates.notna()
+
+    df = df.loc[valid].copy()
+    df.index = index_dates[valid].strftime("%Y-%m")
+    df = df.apply(pd.to_numeric, errors="coerce")
+    df = df[~df.index.duplicated(keep="first")].sort_index()
+
+    return df
+
+def load_return_file(file_path: Path) -> pd.DataFrame:
+    """Load monthly Section-SDF excess return data."""
+    return normalize_monthly_index(
+        pd.read_csv(file_path, index_col=0)
+    )
+
+def load_selected_node_return_file(
+    file_path: Path,
+    header_levels: int,
+) -> pd.DataFrame:
+    """Load selected-node returns with their MultiIndex column structure."""
+    if header_levels not in {2, 3}:
+        raise ValueError(
+            f"Unsupported selected-node header level count: {header_levels}"
+        )
+
+    df = pd.read_csv(
+        file_path,
+        header=list(range(header_levels)),
+        index_col=0,
+    )
+
+    df = normalize_monthly_index(df)
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+
+    return df
+
+def extract_weight_scheme(portfolio_name: str) -> str:
+    """Extract AP-Tree depth-weight scheme from a Section-SDF name."""
+    match = re.search(
+        r"_dw_power(\d+(?:\.\d+)?)$",
+        str(portfolio_name),
+    )
+
+    return f"dw_power{match.group(1)}" if match else "none"
+
+def base_section_name(portfolio_name: str) -> str:
+    """Remove strategy-specific suffixes from a Section-SDF name."""
+    name = re.sub(
+        r"_dw_power\d+(?:\.\d+)?$",
+        "",
+        str(portfolio_name),
+    )
+
+    return re.sub(r"_triplesort$", "", name)
+
+def extract_feature_string(portfolio_name: str) -> str:
+    """Parse feature labels without breaking names containing underscores."""
+    name = re.sub(
+        r"^Sec\d+_?",
+        "",
+        base_section_name(portfolio_name),
+    )
+
+    remaining = name
+    features = []
+
+    for raw_feature in sorted(FEATURE_MAP, key=len, reverse=True):
+        pattern = rf"(?:^|_){re.escape(raw_feature)}(?:_|$)"
+
+        if re.search(pattern, remaining):
+            features.append(FEATURE_MAP[raw_feature])
+            remaining = re.sub(pattern, "_", remaining)
+
+    return ", ".join(features) if features else base_section_name(portfolio_name)
+
+def max_drawdown(returns: pd.Series) -> float:
+    """Calculate maximum peak-to-trough drawdown from compounded returns."""
+    clean = returns.dropna().astype(float)
+
+    if clean.empty:
+        return np.nan
+
+    wealth = (1.0 + clean).cumprod()
+    drawdowns = wealth.div(wealth.cummax()).sub(1.0)
+
+    return float(drawdowns.min())
+
+def calculate_performance_metrics(returns: pd.Series) -> dict:
+    """Calculate out-of-sample monthly performance statistics."""
+    clean = returns.dropna().astype(float)
+    n_obs = len(clean)
+
+    if n_obs == 0:
+        return {
+            "Test_Nobs": 0,
+            "Monthly_Avg_Excess_Return": np.nan,
+            "Monthly_Sharpe": np.nan,
+            "Annualized_Sharpe": np.nan,
+            "Max_Drawdown": np.nan,
+        }
+
+    monthly_mean = clean.mean()
+    monthly_volatility = clean.std(ddof=1) if n_obs > 1 else np.nan
+
+    monthly_sharpe = (
+        monthly_mean / monthly_volatility
+        if pd.notna(monthly_volatility) and monthly_volatility > 0
+        else np.nan
+    )
+
+    return {
+        "Test_Nobs": n_obs,
+        "Monthly_Avg_Excess_Return": monthly_mean,
+        "Monthly_Sharpe": monthly_sharpe,
+        "Annualized_Sharpe": (
+            monthly_sharpe * np.sqrt(12)
+            if pd.notna(monthly_sharpe)
+            else np.nan
+        ),
+        "Max_Drawdown": max_drawdown(clean),
+    }
+
+# =============================================================================
+# Pruning-result metadata and selected-node weights
+# =============================================================================
+
+def detail_section_candidates(
+    strategy: str,
+    portfolio: str,
+) -> set[str]:
+    """Return possible section labels used in pruning detailed-result files."""
+    if strategy.startswith("TripleSort64"):
+        return {
+            str(portfolio),
+            base_section_name(portfolio),
+            f"{base_section_name(portfolio)}_triplesort",
+        }
+
+    return {
+        str(portfolio),
+        base_section_name(portfolio),
+    }
+
+def load_pruning_metadata(
+    strategy: str,
+    portfolio: str,
+) -> dict:
+    """
+    Recover pruning metrics and best lambda values from detailed prune outputs.
+
+    Section-SDF returns files do not contain lambda0/lambda2, selected-node
+    count, or the actual pruning result values. These are recovered from the
+    Type == 'Section Info' row of the detailed pruning output.
+    """
+    cfg = CONFIG["strategies"][strategy]
+    detail_relative_path = cfg.get("detail_path")
+
+    empty = {
+        "Best_Lambda0": np.nan,
+        "Best_Lambda2": np.nan,
+        "Selected_Nodes": np.nan,
+        "Prune_Monthly_Sharpe": np.nan,
+        "Prune_Annualized_Sharpe": np.nan,
+        "Prune_Max_Drawdown": np.nan,
+        "Prune_Monthly_Avg_Excess_Return": np.nan,
+    }
+
+    if not detail_relative_path:
+        return empty
+
+    detail_path = PROJECT_ROOT / detail_relative_path
+
+    if not detail_path.exists():
+        print(
+            f"Warning: detailed pruning file not found for {strategy}: "
+            f"{detail_path}"
+        )
+        return empty
+
+    detailed = pd.read_csv(detail_path)
+
+    if "Section" not in detailed.columns:
+        print(
+            f"Warning: {detail_path.name} has no 'Section' column."
+        )
+        return empty
+
+    section_rows = detailed.copy()
+
+    if "Type" in section_rows.columns:
+        section_rows = section_rows.loc[
+            section_rows["Type"].astype(str).eq("Section Info")
+        ]
+
+    candidates = detail_section_candidates(strategy, portfolio)
+
+    section_rows = section_rows.loc[
+        section_rows["Section"].astype(str).isin(candidates)
+    ]
+
+    weight_scheme = extract_weight_scheme(portfolio)
+
+    if "Weight_Scheme" in section_rows.columns:
+        section_rows = section_rows.loc[
+            section_rows["Weight_Scheme"].astype(str).eq(weight_scheme)
+        ]
+
+    if section_rows.empty:
+        return empty
+
+    row = section_rows.iloc[0]
+
+    def read_value(*column_names: str) -> float:
+        for column_name in column_names:
+            if column_name in row.index:
+                return parse_float(row[column_name])
+        return np.nan
+
+    return {
+        "Best_Lambda0": read_value(
+            "Best_lambda0",
+            "Best_λ0",
+            "Best_Lambda0",
+        ),
+        "Best_Lambda2": read_value(
+            "Best_lambda2",
+            "Best_λ2",
+            "Best_Lambda2",
+        ),
+        "Selected_Nodes": read_value(
+            "Selected_Portfolios",
+            "Selected_Nodes",
+        ),
+        "Prune_Monthly_Sharpe": read_value(
+            "Test_Monthly_Sharpe",
+        ),
+        "Prune_Annualized_Sharpe": read_value(
+            "Annualised_Sharpe",
+            "Annualized_Sharpe",
+        ),
+        "Prune_Max_Drawdown": read_value(
+            "Max_Drawdown",
+        ),
+        "Prune_Monthly_Avg_Excess_Return": read_value(
+            "Monthly_Avg_Excess_Return",
+        ),
+    }
+
+def load_selected_weights(
+    strategy: str,
+    portfolio: str,
+) -> pd.DataFrame:
+    """Load selected node weights for one Section-SDF."""
+    cfg = CONFIG["strategies"][strategy]
+    detail_relative_path = cfg.get("detail_path")
+
+    if not detail_relative_path:
+        return pd.DataFrame(columns=["Node_Name", "Weight", "Depth"])
+
+    detail_path = PROJECT_ROOT / detail_relative_path
+
+    if not detail_path.exists():
+        print(
+            f"Warning: detailed pruning file not found for {strategy}: "
+            f"{detail_path}"
+        )
+        return pd.DataFrame(columns=["Node_Name", "Weight", "Depth"])
+
+    detailed = pd.read_csv(detail_path)
+
+    if "Type" not in detailed.columns or "Section" not in detailed.columns:
+        print(
+            f"Warning: incompatible detailed pruning file: {detail_path}"
+        )
+        return pd.DataFrame(columns=["Node_Name", "Weight", "Depth"])
+
+    node_column = (
+        "Node_Name"
+        if "Node_Name" in detailed.columns
+        else "Portfolio_Name"
+    )
+
+    if node_column not in detailed.columns or "Weight" not in detailed.columns:
+        print(
+            f"Warning: node or weight field missing from {detail_path.name}"
+        )
+        return pd.DataFrame(columns=["Node_Name", "Weight", "Depth"])
+
+    candidates = detail_section_candidates(strategy, portfolio)
+
+    selected = detailed.loc[
+        detailed["Type"].astype(str).eq("Selected Node")
+        & detailed["Section"].astype(str).isin(candidates)
+    ].copy()
+
+    weight_scheme = extract_weight_scheme(portfolio)
+
+    if "Weight_Scheme" in selected.columns:
+        selected = selected.loc[
+            selected["Weight_Scheme"].astype(str).eq(weight_scheme)
+        ]
+
+    if selected.empty:
+        return pd.DataFrame(columns=["Node_Name", "Weight", "Depth"])
+
+    selected = selected.rename(
+        columns={
+            node_column: "Node_Name",
+        }
+    )
+
+    selected["Weight"] = selected["Weight"].map(parse_float)
+
+    if "Depth" not in selected.columns:
+        selected["Depth"] = np.nan
+
+    return selected[["Node_Name", "Weight", "Depth"]].dropna(
+        subset=["Weight"]
+    )
+
+# =============================================================================
+# Factor regressions
+# =============================================================================
+
+def run_factor_regression(
+    strategy_returns: pd.Series,
+    factors: pd.DataFrame,
+) -> dict | None:
+    """Estimate alpha with HAC inference and conventional OLS R²."""
+    data = pd.concat(
+        [strategy_returns.rename("return"), factors],
+        axis=1,
+        join="inner",
+    ).dropna()
+
+    if len(data) < CONFIG["min_observations"]:
+        return None
+
+    y = data["return"]
+    x = sm.add_constant(data[factors.columns], has_constant="add")
+
+    nw_lags = CONFIG["nw_lags"]
+
     if nw_lags is None:
-        nw_lags = int(4 * (len(y) / 100) ** (2/9))
+        nw_lags = max(
+            0,
+            int(4 * (len(y) / 100.0) ** (2.0 / 9.0)),
+        )
+
     try:
-        nw = sm.OLS(y, X).fit(cov_type='HAC', cov_kwds={'maxlags': nw_lags})
-        ols = sm.OLS(y, X).fit()
-    except Exception:
-        return None, None
-    res = {
-        'alpha_monthly': nw.params['const'],
-        'alpha_annual': nw.params['const'] * 12,
-        't_stat': nw.tvalues['const'],
-        'p_value': nw.pvalues['const'],
-        'R2': ols.rsquared,
-        'n_obs': len(y),
-    }
-    for f in factors.columns:
-        res[f'{f}_beta'] = nw.params.get(f, np.nan)
-        res[f'{f}_t'] = nw.tvalues.get(f, np.nan)
-        res[f'{f}_pvalue'] = nw.pvalues.get(f, np.nan)
-    resid = pd.Series(ols.resid, index=merged.index)
-    return res, resid
-
-def grs_test(strategy_rets, factors, residuals_dict):
-    common_idx = strategy_rets.index.intersection(factors.index)
-    if len(common_idx) < 12:
+        ols = sm.OLS(y, x).fit()
+        hac = sm.OLS(y, x).fit(
+            cov_type="HAC",
+            cov_kwds={"maxlags": nw_lags},
+        )
+    except (ValueError, np.linalg.LinAlgError):
         return None
-    R = strategy_rets.loc[common_idx]
-    F = factors.loc[common_idx]
-    T, N, K = R.shape[0], R.shape[1], F.shape[1]
-    if T <= N + K:
-        return None
-    X = sm.add_constant(F)
-    alphas, resid_list = [], []
-    for col in R.columns:
-        if col in residuals_dict and not residuals_dict[col].empty:
-            resid_df = residuals_dict[col].loc[common_idx]
-            resid_list.append(resid_df.values)
-            model = sm.OLS(R[col], X).fit()
-            alphas.append(model.params['const'])
-        else:
-            model = sm.OLS(R[col], X).fit()
-            alphas.append(model.params['const'])
-            resid_list.append(model.resid.values)
-    alpha_vec = np.array(alphas).reshape(-1,1)
-    residuals = np.array(resid_list).T
-    Sigma = np.cov(residuals, rowvar=False)
-    try:
-        inv_Sigma = np.linalg.inv(Sigma)
-    except np.linalg.LinAlgError:
-        inv_Sigma = np.linalg.pinv(Sigma)
-    Omega = F.cov().values
-    mu_f = F.mean().values.reshape(-1,1)
-    inv_Omega = np.linalg.pinv(Omega)
-    quad = alpha_vec.T @ inv_Sigma @ alpha_vec
-    denom = 1 + mu_f.T @ inv_Omega @ mu_f
-    grs = (T - N - K) / N * (quad / denom)
-    grs_val = float(grs)
-    p_val = float(1 - f_dist.cdf(grs_val, N, T - N - K))
-    return {'GRS': grs_val, 'p_value': p_val, 'N': N, 'T': T, 'K': K}
 
-def extract_feature_string(section_name):
-    name = re.sub(r'_dw_power\d+\.?\d*$', '', section_name)
-    name = re.sub(r'_triplesort$', '', name)
-    parts = name.split('_')
-    if len(parts) > 1 and parts[0].startswith('Sec'):
-        feat_parts = parts[1:]
-    else:
-        feat_parts = parts
-    return ', '.join([FEATURE_MAP.get(f, f) for f in feat_parts])
-
-def extract_weight_scheme(portfolio_name):
-    match = re.search(r'_dw_power(\d+\.?\d*)$', portfolio_name)
-    return f"dw_power{match.group(1)}" if match else ""
-
-def load_summary_metrics(strategy_key):
-    path_map = {
-        'APTree_K20': PROJECT_ROOT / 'output' / 'pruned' / 'AP-Tree_full' / 'All_Sections_Summary_kmax20.csv',
-        'APTree_K40': PROJECT_ROOT / 'output' / 'pruned' / 'AP-Tree_full' / 'All_Sections_Summary_kmax40.csv',
-        'APTree_clean_K20': PROJECT_ROOT / 'output' / 'pruned' / 'AP-Tree_cleaned' / 'All_Sections_Summary_kmax20.csv',
-        'APTree_clean_K40': PROJECT_ROOT / 'output' / 'pruned' / 'AP-Tree_cleaned' / 'All_Sections_Summary_kmax40.csv',
-        'TripleSort64': PROJECT_ROOT / 'output' / 'pruned' / 'TripleSort64_full' / 'All_TripleSort_Sharpe_Summary.csv',
-        'TripleSort128_clean': PROJECT_ROOT / 'output' / 'pruned' / 'TripleSort128_cleaned' / 'All_TripleSort_Sharpe_Summary.csv',
-        'TripleSort128_longonly': PROJECT_ROOT / 'output' / 'pruned' / 'TripleSort128_cleaned_longonly' / 'Summary_TripleSort128_longonly.csv',
-        'APTree_longonly_K5': PROJECT_ROOT / 'output' / 'pruned' / 'AP-Tree_cleaned_longonly' / 'All_Sections_Summary_kmax5.csv',
+    return {
+        "Alpha_monthly": hac.params["const"],
+        "Alpha_annualized": hac.params["const"] * 12,
+        "Alpha_t": hac.tvalues["const"],
+        "Alpha_p": hac.pvalues["const"],
+        "R2": ols.rsquared,
+        "Regression_Nobs": len(y),
+        "Newey_West_Lags": nw_lags,
     }
-    path = path_map.get(strategy_key)
-    if not path or not path.exists():
-        return {}
-    df = pd.read_csv(path, encoding='utf-8-sig')
-    sec_col = 'Section' if 'Section' in df.columns else None
-    if sec_col is None:
-        return {}
-    sharpe_candidates = ['Test_Monthly_Sharpe', 'Test_Sharpe', 'Test_SR']
-    test_col = next((c for c in sharpe_candidates if c in df.columns), None)
-    if test_col is None:
-        return {}
-    weight_col = 'Weight_Scheme' if 'Weight_Scheme' in df.columns else None
-    summary = {}
-    for _, row in df.iterrows():
-        sec = row[sec_col]
-        if weight_col and not pd.isna(row.get(weight_col, '')):
-            port_name = f"{sec}_{row[weight_col]}"
-        else:
-            port_name = sec
-        summary[port_name] = float(row[test_col]) if not pd.isna(row[test_col]) else np.nan
-    return summary
 
-# ==================== Main ====================
-def main():
-    print("=" * 80)
-    print("Factor Model Tests (All five models significant)")
-    print("=" * 80)
-    out_dir = Path(CONFIG['output_dir'])
-    out_dir.mkdir(parents=True, exist_ok=True)
+def is_significant(regression: pd.Series) -> bool:
+    """Apply the configured alpha significance rule."""
+    passed = (
+        pd.notna(regression["Alpha_p"])
+        and regression["Alpha_p"] < CONFIG["significance_level"]
+    )
 
-    factor_models = {name: load_factors(name) for name in CONFIG['models']}
+    if CONFIG["require_positive_alpha"]:
+        passed = passed and regression["Alpha_monthly"] > 0
 
-    # ---- 1. Run all regressions and store results + residuals ----
-    results_store = {}      # results_store[strat][model] = DataFrame (index=portfolio)
-    residuals_store = {}    # residuals_store[strat][model] = dict(portfolio -> series)
-    test_sharpe_map = {}
+    return bool(passed)
 
-    for strat_key, rel_path in CONFIG['strategies'].items():
-        file_path = PROJECT_ROOT / rel_path
-        if not file_path.exists():
-            print(f"Warning: {strat_key} file not found: {file_path}")
+# =============================================================================
+# XS-R² for selected cleaned-sample basis nodes
+# =============================================================================
+
+def selected_node_column_metadata(
+    strategy: str,
+    column: tuple,
+) -> tuple[str, str, str]:
+    """
+    Map a selected-node return column to section, depth strategy, and node name.
+
+    TripleSort64 uses a two-level column index:
+        (Section, Portfolio_Name)
+
+    AP-Tree uses a three-level column index:
+        (Section, Weight_Scheme, Node_Name)
+    """
+    if strategy == "TripleSort64_clean":
+        section, node_name = column
+        return str(section), "none", str(node_name)
+
+    section, weight_scheme, node_name = column
+    return str(section), str(weight_scheme), str(node_name)
+
+def calculate_xs_r2(
+    node_returns: pd.DataFrame,
+    factors: pd.DataFrame,
+) -> dict:
+    """
+    Estimate node-level OLS alphas and calculate JF-style XS-R².
+
+    XS-R² = 1 - [N / (N - K)] *
+                 [sum(alpha_i²) / sum(mean_return_i²)]
+
+    N is the number of selected basis nodes and K is the number of factors.
+    """
+    data = pd.concat(
+        [node_returns, factors],
+        axis=1,
+        join="inner",
+    ).dropna()
+
+    n_assets = node_returns.shape[1]
+    n_factors = factors.shape[1]
+
+    result = {
+        "Status": "ok",
+        "N_Selected_Nodes": n_assets,
+        "N_Model_Factors": n_factors,
+        "XS_R²": np.nan,
+    }
+
+    if len(data) < CONFIG["min_observations"]:
+        result["Status"] = "insufficient_observations"
+        return result
+
+    if n_assets <= n_factors:
+        result["Status"] = "insufficient_nodes_for_degree_adjustment"
+        return result
+
+    returns = data.iloc[:, :n_assets]
+    factor_data = data.iloc[:, n_assets:]
+    x = sm.add_constant(factor_data, has_constant="add")
+
+    alpha_values = []
+    mean_return_values = []
+
+    for node_name in returns.columns:
+        try:
+            fitted = sm.OLS(returns[node_name], x).fit()
+        except (ValueError, np.linalg.LinAlgError):
+            result["Status"] = "node_regression_failed"
+            return result
+
+        alpha_values.append(fitted.params["const"])
+        mean_return_values.append(returns[node_name].mean())
+
+    sum_alpha_squared = float(np.square(alpha_values).sum())
+    sum_mean_return_squared = float(np.square(mean_return_values).sum())
+
+    if sum_mean_return_squared <= 1e-16:
+        result["Status"] = "zero_mean_return_denominator"
+        return result
+
+    result["XS_R²"] = float(
+        1.0
+        - (n_assets / (n_assets - n_factors))
+        * (sum_alpha_squared / sum_mean_return_squared)
+    )
+
+    return result
+
+def calculate_cleaned_xs_r2(
+    factor_models: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """
+    Calculate XS-R² for every cleaned-sample strategy, Section, depth scheme,
+    and configured factor model.
+    """
+    rows = []
+
+    for strategy, strategy_cfg in CONFIG["strategies"].items():
+        if strategy_cfg["sample"] != "Cleaned":
             continue
-        print(f"\nProcessing {strat_key}...")
-        ret_df = pd.read_csv(file_path, index_col=0, parse_dates=True)
-        ret_df.index = ret_df.index.strftime('%Y-%m')
-        ret_df = ret_df.sort_index()
-        print(f"  Loaded {ret_df.shape[1]} portfolios")
 
-        sharpe_dict = load_summary_metrics(strat_key)
-        test_sharpe_map[strat_key] = sharpe_dict
+        selected_node_relative_path = strategy_cfg.get(
+            "selected_node_path"
+        )
 
-        results_store[strat_key] = {}
-        residuals_store[strat_key] = {}
-        for model_name, factors in factor_models.items():
-            common = ret_df.index.intersection(factors.index)
-            if len(common) < 12:
-                continue
-            model_res = []
-            model_resid = {}
-            for col in ret_df.columns:
-                ret_ser = ret_df[col].dropna()
-                if len(ret_ser) < 12:
-                    continue
-                res, resid = run_factor_regression(ret_ser, factors, CONFIG['nw_lags'])
-                if res is not None:
-                    res['portfolio'] = col
-                    model_res.append(res)
-                    model_resid[col] = resid
-            if model_res:
-                df_res = pd.DataFrame(model_res).set_index('portfolio')
-                results_store[strat_key][model_name] = df_res
-                residuals_store[strat_key][model_name] = model_resid
-                print(f"  Model {model_name}: {len(df_res)} portfolios")
-
-    # ---- 2. Identify portfolios significant in ALL five models ----
-    model_names = list(factor_models.keys())
-    alpha_threshold = CONFIG['significance_level']
-
-    # Gather all unique portfolios across all strategies
-    all_portfolios_info = []   # list of dicts: strategy, portfolio, scheme, test_sharpe, alpha_p for each model
-    for strat_key in results_store:
-        # To be considered, portfolio must appear in all five models
-        common_ports = None
-        for m in model_names:
-            if m in results_store[strat_key]:
-                if common_ports is None:
-                    common_ports = set(results_store[strat_key][m].index)
-                else:
-                    common_ports = common_ports.intersection(results_store[strat_key][m].index)
-        if not common_ports:
+        if not selected_node_relative_path:
             continue
-        for port in common_ports:
-            # collect p-values
-            pvals = {}
-            for m in model_names:
-                pvals[m] = results_store[strat_key][m].loc[port, 'p_value']
-            if all(pd.notna(pv) and pv < alpha_threshold for pv in pvals.values()):
-                # it passes
-                sharpe = test_sharpe_map.get(strat_key, {}).get(port, np.nan)
-                if not np.isnan(sharpe):
-                    all_portfolios_info.append({
-                        'strategy': strat_key,
-                        'portfolio': port,
-                        'weight_scheme': extract_weight_scheme(port),
-                        'test_sharpe': sharpe,
-                        'alpha_pvals': pvals,
-                    })
 
-    if not all_portfolios_info:
-        print("No portfolio passes all five factor models. Exiting.")
-        return
+        node_path = PROJECT_ROOT / selected_node_relative_path
 
-    df_candidates = pd.DataFrame(all_portfolios_info)
+        if not node_path.exists():
+            print(
+                f"Warning: selected-node file not found for {strategy}: "
+                f"{node_path}"
+            )
+            continue
 
-    # ---- 3. For each strategy-weight scheme, take top 10 by test Sharpe ----
-    # Build a list of (strategy, scheme) combinations present in candidates
-    strategy_scheme_groups = df_candidates.groupby(['strategy', 'weight_scheme'])
+        selected_nodes = load_selected_node_return_file(
+            node_path,
+            strategy_cfg["selected_node_header_levels"],
+        )
 
-    # We'll also need a mapping from (strategy, scheme) to "display name" used in outputs
-    # For TripleSort, scheme is ""; for AP-Tree, scheme like "dw_power2.0"
-    def make_display_name(strat, scheme):
-        if scheme:
-            return f"{strat}_{scheme}"
+        grouped_columns: dict[tuple[str, str], list[tuple]] = {}
+
+        for column in selected_nodes.columns:
+            section, weight_scheme, _ = selected_node_column_metadata(
+                strategy,
+                column,
+            )
+
+            grouped_columns.setdefault(
+                (section, weight_scheme),
+                [],
+            ).append(column)
+
+        print(
+            f"Calculating XS-R² for {strategy}: "
+            f"{len(grouped_columns)} Section-SDF specifications"
+        )
+
+        for (section, weight_scheme), columns in grouped_columns.items():
+            section_nodes = selected_nodes.loc[:, columns].copy()
+
+            section_nodes.columns = [
+                selected_node_column_metadata(strategy, column)[2]
+                for column in columns
+            ]
+
+            if section_nodes.columns.duplicated().any():
+                section_nodes = (
+                    section_nodes.T.groupby(level=0).mean().T
+                )
+
+            for model_name, factor_df in factor_models.items():
+                xs_result = calculate_xs_r2(
+                    section_nodes,
+                    factor_df,
+                )
+
+                rows.append({
+                    "Sample": "Cleaned",
+                    "Strategy": strategy,
+                    "Model_Name": strategy_cfg["model_name"],
+                    "Weight_Scheme": weight_scheme,
+                    "Section": base_section_name(section),
+                    "Section_SDF": section,
+                    "Model": model_name,
+                    **xs_result,
+                })
+
+    return pd.DataFrame(rows)
+
+# =============================================================================
+# Table construction
+# =============================================================================
+
+def build_wide_result(
+    strategy: str,
+    sample: str,
+    portfolio: str,
+    performance: dict,
+    pruning_metadata: dict,
+    model_results: dict[str, pd.DataFrame],
+    model_names: list[str],
+    xs_lookup: dict[tuple[str, str, str, str], float],
+) -> dict:
+    """Build one compact Section-SDF result row across all factor models."""
+    weight_scheme = extract_weight_scheme(portfolio)
+    section = base_section_name(portfolio)
+
+    result = {
+        "Sample": sample,
+        "Strategy": strategy,
+        "Model_Name": CONFIG["strategies"][strategy]["model_name"],
+        "Weight_Scheme": weight_scheme,
+        "Section_SDF": portfolio,
+        "Section": section,
+        "Feature": extract_feature_string(portfolio),
+        "Annualized_Sharpe": pruning_metadata[
+            "Prune_Annualized_Sharpe"
+        ],
+        "Monthly_Sharpe": pruning_metadata[
+            "Prune_Monthly_Sharpe"
+        ],
+        "Max_Drawdown": pruning_metadata["Prune_Max_Drawdown"],
+        "Monthly_Avg_Excess_Return": pruning_metadata[
+            "Prune_Monthly_Avg_Excess_Return"
+        ],
+        "Best_Lambda0": pruning_metadata["Best_Lambda0"],
+        "Best_Lambda2": pruning_metadata["Best_Lambda2"],
+        "Selected_Nodes": pruning_metadata["Selected_Nodes"],
+    }
+
+    for metric_name in PERFORMANCE_COLUMNS:
+        if pd.isna(result[metric_name]):
+            result[metric_name] = performance[metric_name]
+
+    all_models_significant = True
+
+    for model_name in model_names:
+        regression = model_results[model_name].loc[portfolio]
+
+        result[f"{model_name}_Alpha_Annualized"] = (
+            regression["Alpha_annualized"]
+        )
+        result[f"{model_name}_R²"] = regression["R2"]
+
+        if sample == "Cleaned":
+            xs_key = (
+                strategy,
+                section,
+                weight_scheme,
+                model_name,
+            )
+            result[f"{model_name}_XS_R²"] = xs_lookup.get(xs_key, np.nan)
         else:
-            return strat
+            result[f"{model_name}_XS_R²"] = np.nan
 
-    # ---- 3. Top 10 per strategy (merging depth-weight schemes within same K) ----
-    strategy_groups = df_candidates.groupby('strategy')
-    top10_tables = {}
-    for strat, group in strategy_groups:
-        top10 = group.nlargest(10, 'test_sharpe')
-        display = strat  # e.g., "APTree_K20"
-        rows = []
-        for _, row in top10.iterrows():
-            port = row['portfolio']
-            feat = extract_feature_string(port)
-            entry = {
-                'Section_Feature': feat,
-                'Portfolio': port,
-                'Test_Monthly_Sharpe': row['test_sharpe'],
-                'Weight_Scheme': row['weight_scheme'] if row['weight_scheme'] else 'none',
-            }
-            for m in model_names:
-                if m in results_store[strat]:
-                    reg = results_store[strat][m].loc[port]
-                    entry[f'{m}_alpha_annual'] = reg['alpha_annual']
-                    entry[f'{m}_alpha_t'] = reg['t_stat']
-                    entry[f'{m}_alpha_p'] = row['alpha_pvals'][m]
-                    entry[f'{m}_R2'] = reg['R2']
-                    entry[f'{m}_Nobs'] = reg['n_obs']
-            rows.append(entry)
-        top10_tables[display] = pd.DataFrame(rows)
-        top10_tables[display].to_csv(out_dir / f"Top10_{display}.csv", index=False, encoding='utf-8-sig')
-        print(f"Saved Top10 for {display}")
+        all_models_significant = (
+            all_models_significant
+            and is_significant(regression)
+        )
 
-    # ---- 4. GRS tables for full sample and cleaned sample ----
-    # Define the five objects for each sample:
-    full_sample_objects = [
-        ('TripleSort64', ''),
-        ('APTree_K20', 'dw_power0.5'),
-        ('APTree_K20', 'dw_power2.0'),
-        ('APTree_K40', 'dw_power0.5'),
-        ('APTree_K40', 'dw_power2.0'),
-    ]
-    cleaned_sample_objects = [
-        ('TripleSort128_clean', ''),
-        ('APTree_clean_K20', 'dw_power0.5'),
-        ('APTree_clean_K20', 'dw_power2.0'),
-        ('APTree_clean_K40', 'dw_power0.5'),
-        ('APTree_clean_K40', 'dw_power2.0'),
+    result["Passes_All_Models"] = all_models_significant
+
+    return result
+
+def paper_table_columns(model_names: list[str]) -> list[str]:
+    """Return compact paper-ready column order for wide Section-SDF tables."""
+    columns = [
+        "Rank",
+        "Sample",
+        "Strategy",
+        "Model_Name",
+        "Weight_Scheme",
+        "Section",
+        "Feature",
+        "Annualized_Sharpe",
+        "Monthly_Sharpe",
+        "Max_Drawdown",
+        "Monthly_Avg_Excess_Return",
+        "Best_Lambda0",
+        "Best_Lambda2",
+        "Selected_Nodes",
     ]
 
-    def compute_grs_for_objects(objects, sample_label):
-        grs_rows = []
-        for strat, scheme in objects:
-            if strat not in results_store:
+    for model_name in model_names:
+        columns.extend([
+            f"{model_name}_Alpha_Annualized",
+            f"{model_name}_R²",
+            f"{model_name}_XS_R²",
+        ])
+
+    return columns
+
+def compact_table(
+    df: pd.DataFrame,
+    model_names: list[str],
+    include_rank: bool = False,
+) -> pd.DataFrame:
+    """Select paper-ready columns that are present in a DataFrame."""
+    columns = paper_table_columns(model_names)
+
+    if not include_rank:
+        columns = [
+            column for column in columns
+            if column != "Rank"
+        ]
+
+    return df.loc[
+        :,
+        [column for column in columns if column in df.columns],
+    ].copy()
+
+def build_long_only_sharpe_summary(
+    returns_store: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Build the single requested long-only performance summary."""
+    rows = []
+
+    for strategy, returns in returns_store.items():
+        strategy_cfg = CONFIG["strategies"][strategy]
+
+        if strategy_cfg["sample"] != "LongOnly":
+            continue
+
+        for portfolio in returns.columns:
+            metrics = calculate_performance_metrics(
+                returns[portfolio]
+            )
+
+            rows.append({
+                "Strategy": strategy,
+                "Model_Name": strategy_cfg["model_name"],
+                "Weight_Scheme": extract_weight_scheme(portfolio),
+                "Section": base_section_name(portfolio),
+                "Feature": extract_feature_string(portfolio),
+                "Annualized_Sharpe": metrics["Annualized_Sharpe"],
+                "Monthly_Sharpe": metrics["Monthly_Sharpe"],
+                "Max_Drawdown": metrics["Max_Drawdown"],
+                "Monthly_Avg_Excess_Return": metrics[
+                    "Monthly_Avg_Excess_Return"
+                ],
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(
+            [
+                "Strategy",
+                "Weight_Scheme",
+                "Monthly_Sharpe",
+            ],
+            ascending=[True, True, False],
+        )
+        .reset_index(drop=True)
+    )
+
+def build_top_sdf_weight_distributions(
+    wide_results: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Export selected-node weights for the globally highest-Sharpe SDFs.
+
+    Full sample: top 3 SDFs across all Full-sample strategies.
+    Cleaned sample: top 6 SDFs across all Cleaned-sample strategies.
+    """
+    output_rows = []
+
+    ranking_rules = {
+        "Full": CONFIG["top_full_sdfs"],
+        "Cleaned": CONFIG["top_cleaned_sdfs"],
+    }
+
+    for sample, top_n in ranking_rules.items():
+        candidates = wide_results.loc[
+            wide_results["Sample"].eq(sample)
+        ].copy()
+
+        top_sdfs = (
+            candidates
+            .sort_values("Monthly_Sharpe", ascending=False)
+            .head(top_n)
+            .reset_index(drop=True)
+        )
+
+        for rank, sdf in enumerate(
+            top_sdfs.itertuples(index=False),
+            start=1,
+        ):
+            selected_weights = load_selected_weights(
+                sdf.Strategy,
+                sdf.Section_SDF,
+            )
+
+            if selected_weights.empty:
+                print(
+                    f"Warning: no selected weights found for "
+                    f"{sdf.Strategy} / {sdf.Section_SDF}"
+                )
                 continue
-            # collect portfolios belonging to this scheme
-            if scheme:
-                target_ports = [p for p in results_store[strat][model_names[0]].index if extract_weight_scheme(p) == scheme]
-            else:
-                target_ports = [p for p in results_store[strat][model_names[0]].index if extract_weight_scheme(p) == '']
-            if len(target_ports) < 2:
-                continue
-            # for each factor model
-            for model in model_names:
-                if model not in results_store[strat]:
-                    continue
-                # select only portfolios that exist in this model's results (should be all)
-                common = [p for p in target_ports if p in results_store[strat][model].index]
-                if len(common) < 2:
-                    continue
-                # get return data
-                ret_file = PROJECT_ROOT / CONFIG['strategies'][strat]
-                ret_df = pd.read_csv(ret_file, index_col=0, parse_dates=True)
-                ret_df.index = ret_df.index.strftime('%Y-%m')
-                ret_sel = ret_df[common]
-                factors = factor_models[model]
-                resid_dict = {p: residuals_store[strat][model][p] for p in common}
-                grs_out = grs_test(ret_sel, factors, resid_dict)
-                if grs_out:
-                    grs_rows.append({
-                        'Sample': sample_label,
-                        'Strategy': make_display_name(strat, scheme),
-                        'Model': model,
-                        'GRS': grs_out['GRS'],
-                        'p_value': grs_out['p_value'],
-                        'N': grs_out['N'],
-                        'T': grs_out['T'],
-                        'K': grs_out['K']
-                    })
-        return pd.DataFrame(grs_rows)
 
-    df_grs_full = compute_grs_for_objects(full_sample_objects, 'Full')
-    df_grs_cleaned = compute_grs_for_objects(cleaned_sample_objects, 'Cleaned')
-    if not df_grs_full.empty:
-        df_grs_full.to_csv(out_dir / 'GRS_Full_Sample.csv', index=False, encoding='utf-8-sig')
-    if not df_grs_cleaned.empty:
-        df_grs_cleaned.to_csv(out_dir / 'GRS_Cleaned_Sample.csv', index=False, encoding='utf-8-sig')
-    print("GRS tables saved.")
+            for node in selected_weights.itertuples(index=False):
+                output_rows.append({
+                    "Sample": sample,
+                    "Rank": rank,
+                    "Strategy": sdf.Strategy,
+                    "Model_Name": sdf.Model_Name,
+                    "Depth_Strategy": sdf.Weight_Scheme,
+                    "Section_SDF": sdf.Section_SDF,
+                    "Section": sdf.Section,
+                    "Feature": sdf.Feature,
+                    "Node_Name": node.Node_Name,
+                    "Depth": node.Depth,
+                    "Weight": node.Weight,
+                    "Selected_Nodes": sdf.Selected_Nodes,
+                    "Annualized_Sharpe": sdf.Annualized_Sharpe,
+                    "Monthly_Sharpe": sdf.Monthly_Sharpe,
+                    "Max_Drawdown": sdf.Max_Drawdown,
+                    "Monthly_Avg_Excess_Return": (
+                        sdf.Monthly_Avg_Excess_Return
+                    ),
+                    "Best_Lambda0": sdf.Best_Lambda0,
+                    "Best_Lambda2": sdf.Best_Lambda2,
+                })
 
-    # ---- 5. Long-only section table (36 sections × 3 strategies) ----
-    long_strategies = [
-        ('TripleSort128_longonly', ''),
-        ('APTree_longonly_K5', 'dw_power0.5'),
-        ('APTree_longonly_K5', 'dw_power2.0'),
+    if not output_rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(output_rows).sort_values(
+        ["Sample", "Rank", "Weight"],
+        ascending=[True, True, False],
+    )
+
+# =============================================================================
+# Main procedure
+# =============================================================================
+
+def main() -> None:
+    print("=" * 80)
+    print("Step 4: Factor Model Tests and Paper-Ready Tables")
+    print("=" * 80)
+
+    output_dir = Path(CONFIG["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model_names = list(CONFIG["models"])
+
+    print("Loading factor models...")
+    factor_models = {
+        model_name: load_factors(model_name)
+        for model_name in model_names
+    }
+
+    for model_name, factor_df in factor_models.items():
+        print(
+            f"  {model_name}: {len(factor_df)} months, "
+            f"factors = {', '.join(factor_df.columns)}"
+        )
+
+    # -------------------------------------------------------------------------
+    # 1. Load all available strategy return files, including long-only files.
+    # -------------------------------------------------------------------------
+    returns_store: dict[str, pd.DataFrame] = {}
+
+    for strategy, strategy_cfg in CONFIG["strategies"].items():
+        return_path = PROJECT_ROOT / strategy_cfg["path"]
+
+        if not return_path.exists():
+            print(
+                f"Warning: return file not found for {strategy}: "
+                f"{return_path}"
+            )
+            continue
+
+        returns_store[strategy] = load_return_file(return_path)
+
+        print(
+            f"Loaded {strategy}: "
+            f"{returns_store[strategy].shape[1]} Section-SDF returns"
+        )
+
+    # -------------------------------------------------------------------------
+    # 2. XS-R² for all cleaned-sample strategies and all configured models.
+    # -------------------------------------------------------------------------
+    print("\nCalculating cleaned-sample XS-R²...")
+    xs_r2_results = calculate_cleaned_xs_r2(factor_models)
+
+    xs_r2_output_columns = [
+        "Sample",
+        "Strategy",
+        "Model_Name",
+        "Weight_Scheme",
+        "Section",
+        "Section_SDF",
+        "Model",
+        "N_Selected_Nodes",
+        "N_Model_Factors",
+        "XS_R²",
+        "Status",
     ]
-    # Get the list of sections (base names) from any of these strategies
-    base_sec_set = set()
-    for strat, scheme in long_strategies:
-        if strat in results_store:
-            for p in results_store[strat][model_names[0]].index:
-                base = re.sub(r'_dw_power\d+\.?\d*$', '', p)
-                base = re.sub(r'_triplesort$', '', base)
-                base_sec_set.add(base)
-    sections = sorted(base_sec_set)  # should be 36 sections
-    long_rows = []
-    for sec in sections:
-        row = {'Section': sec, 'Feature': extract_feature_string(sec)}
-        for strat, scheme in long_strategies:
-            col_prefix = make_display_name(strat, scheme)
-            # construct portfolio name: for TripleSort128_longonly, port = sec + "_triplesort"? Actually original file may have sec_triplesort
-            if strat == 'TripleSort128_longonly':
-                port = sec + '_triplesort'
-            else:
-                if scheme:
-                    port = f"{sec}_{scheme}"
-                else:
-                    port = sec
-            # check if it passes all five models
-            passes = True
-            for m in model_names:
-                if m not in results_store.get(strat, {}) or port not in results_store[strat][m].index:
-                    passes = False
-                    break
-                pv = results_store[strat][m].loc[port, 'p_value']
-                if pd.isna(pv) or pv >= alpha_threshold:
-                    passes = False
-                    break
-            if passes:
-                # collect alpha info from CH4 or all? We'll store all five alphas
-                for m in model_names:
-                    reg = results_store[strat][m].loc[port]
-                    row[f'{col_prefix}_{m}_alpha'] = reg['alpha_annual']
-                    row[f'{col_prefix}_{m}_t'] = reg['t_stat']
-                row[f'{col_prefix}_sharpe'] = test_sharpe_map.get(strat, {}).get(port, np.nan)
-            else:
-                # leave empty
-                pass
-        long_rows.append(row)
 
-    df_long = pd.DataFrame(long_rows)
-    df_long.to_csv(out_dir / 'LongOnly_Section_Alpha.csv', index=False, encoding='utf-8-sig')
-    print("Long-only table saved.")
+    write_csv(
+        xs_r2_results.loc[
+            :,
+            [
+                column for column in xs_r2_output_columns
+                if column in xs_r2_results.columns
+            ],
+        ],
+        "XS_R²_Cleaned_Sample.csv",
+    )
 
-    # ---- 6. Combined large table with all significant results ----
-    # Merge all Top10 tables together and add identifier columns
-    combined_parts = []
-    for (strat, scheme), group in strategy_scheme_groups:
-        top10 = group.nlargest(10, 'test_sharpe')
-        for _, row in top10.iterrows():
-            entry = {
-                'Strategy': strat,
-                'Weight_Scheme': scheme if scheme else 'none',
-                'Portfolio': row['portfolio'],
-                'Feature': extract_feature_string(row['portfolio']),
-                'Test_Monthly_Sharpe': row['test_sharpe'],
-            }
-            for m in model_names:
-                reg = results_store[strat][m].loc[row['portfolio']]
-                entry[f'{m}_alpha_annual'] = reg['alpha_annual']
-                entry[f'{m}_alpha_t'] = reg['t_stat']
-                entry[f'{m}_alpha_p'] = row['alpha_pvals'][m]
-                entry[f'{m}_R2'] = reg['R2']
-            combined_parts.append(entry)
-    df_combined = pd.DataFrame(combined_parts)
-    df_combined.to_csv(out_dir / 'All_Significant_Combined.csv', index=False, encoding='utf-8-sig')
-    print("Combined table saved.")
-    # ---- 7. Save all regression results for plotting purposes ----
-    all_reg_rows = []
-    for strat_key in results_store:
-        for model_name, df_res in results_store[strat_key].items():
-            factors = factor_models[model_name]          # factor DataFrame
-            factor_names = factors.columns.tolist()
-            for port in df_res.index:
-                row = df_res.loc[port]
-                w_scheme = extract_weight_scheme(port)
-                feat = extract_feature_string(port)
-                sharpe = test_sharpe_map.get(strat_key, {}).get(port, np.nan)
-                base = {
-                    'Strategy': strat_key,
-                    'Weight_Scheme': w_scheme if w_scheme else 'none',
-                    'Portfolio': port,
-                    'Feature': feat,
-                    'Test_Monthly_Sharpe': sharpe,
-                    'Model': model_name,
-                    'Alpha_annual': row['alpha_annual'],
-                    'Alpha_t': row['t_stat'],
-                    'Alpha_p': row['p_value'],
-                    'R2': row['R2'],
-                    'N_obs': row['n_obs'],
-                }
-                # Append factor loadings
-                for f in factor_names:
-                    base[f'{f}_beta'] = row.get(f'{f}_beta', np.nan)
-                    base[f'{f}_t'] = row.get(f'{f}_t', np.nan)
-                    base[f'{f}_p'] = row.get(f'{f}_pvalue', np.nan)
-                all_reg_rows.append(base)
+    xs_lookup: dict[tuple[str, str, str, str], float] = {}
 
-    if all_reg_rows:
-        df_all_reg = pd.DataFrame(all_reg_rows)
-        df_all_reg.to_csv(out_dir / 'All_Regression_Results.csv',
-                          index=False, encoding='utf-8-sig')
-        print("Full regression results saved to All_Regression_Results.csv")
-    print("\nAll factor model tests completed.")
+    if not xs_r2_results.empty:
+        valid_xs = xs_r2_results.loc[
+            xs_r2_results["Status"].eq("ok")
+        ]
+
+        for _, row in valid_xs.iterrows():
+            xs_lookup[
+                (
+                    str(row["Strategy"]),
+                    str(row["Section"]),
+                    str(row["Weight_Scheme"]),
+                    str(row["Model"]),
+                )
+            ] = row["XS_R²"]
+
+    # -------------------------------------------------------------------------
+    # 3. Time-series factor regressions for Full and Cleaned samples only.
+    #    Long-only strategies intentionally receive no factor regressions.
+    # -------------------------------------------------------------------------
+    results_store: dict[str, dict[str, pd.DataFrame]] = {}
+    all_regression_rows = []
+    wide_rows = []
+
+    for strategy, returns in returns_store.items():
+        strategy_cfg = CONFIG["strategies"][strategy]
+        sample = strategy_cfg["sample"]
+
+        if sample == "LongOnly":
+            continue
+
+        print(
+            f"\nRunning factor regressions: {strategy} "
+            f"({returns.shape[1]} Section-SDFs)"
+        )
+
+        results_store[strategy] = {}
+
+        performance_by_portfolio = {
+            portfolio: calculate_performance_metrics(
+                returns[portfolio]
+            )
+            for portfolio in returns.columns
+        }
+
+        pruning_metadata_by_portfolio = {
+            portfolio: load_pruning_metadata(strategy, portfolio)
+            for portfolio in returns.columns
+        }
+
+        for model_name, factor_df in factor_models.items():
+            model_rows = []
+
+            for portfolio in returns.columns:
+                regression = run_factor_regression(
+                    returns[portfolio],
+                    factor_df,
+                )
+
+                if regression is None:
+                    continue
+
+                regression["Section_SDF"] = portfolio
+                model_rows.append(regression)
+
+                all_regression_rows.append({
+                    "Sample": sample,
+                    "Strategy": strategy,
+                    "Model_Name": strategy_cfg["model_name"],
+                    "Weight_Scheme": extract_weight_scheme(portfolio),
+                    "Section_SDF": portfolio,
+                    "Section": base_section_name(portfolio),
+                    "Feature": extract_feature_string(portfolio),
+                    "Model": model_name,
+                    "Alpha_Monthly": regression[
+                        "Alpha_monthly"
+                    ],
+                    "Alpha_Annualized": regression[
+                        "Alpha_annualized"
+                    ],
+                    "Alpha_t": regression[
+                        "Alpha_t"
+                    ],
+                    "Alpha_p": regression[
+                        "Alpha_p"
+                    ],
+                    "Regression_Nobs": regression[
+                        "Regression_Nobs"
+                    ],
+                    "Newey_West_Lags": regression[
+                        "Newey_West_Lags"
+                    ],
+                    "R²": regression["R2"],
+                    "XS_R²": xs_lookup.get(
+                        (
+                            strategy,
+                            base_section_name(portfolio),
+                            extract_weight_scheme(portfolio),
+                            model_name,
+                        ),
+                        np.nan,
+                    ),
+                    "Annualized_Sharpe": performance_by_portfolio[
+                        portfolio
+                    ]["Annualized_Sharpe"],
+                    "Monthly_Sharpe": performance_by_portfolio[
+                        portfolio
+                    ]["Monthly_Sharpe"],
+                    "Max_Drawdown": performance_by_portfolio[
+                        portfolio
+                    ]["Max_Drawdown"],
+                    "Monthly_Avg_Excess_Return": (
+                        performance_by_portfolio[portfolio][
+                            "Monthly_Avg_Excess_Return"
+                        ]
+                    ),
+                    "Best_Lambda0": pruning_metadata_by_portfolio[
+                        portfolio
+                    ]["Best_Lambda0"],
+                    "Best_Lambda2": pruning_metadata_by_portfolio[
+                        portfolio
+                    ]["Best_Lambda2"],
+                    "Selected_Nodes": pruning_metadata_by_portfolio[
+                        portfolio
+                    ]["Selected_Nodes"],
+                })
+
+            if model_rows:
+                results_store[strategy][model_name] = (
+                    pd.DataFrame(model_rows)
+                    .set_index("Section_SDF")
+                )
+                print(
+                    f"  {model_name}: {len(model_rows)} regressions"
+                )
+
+        missing_models = [
+            model_name
+            for model_name in model_names
+            if model_name not in results_store[strategy]
+        ]
+
+        if missing_models:
+            print(
+                f"Warning: {strategy} lacks results for: "
+                f"{missing_models}"
+            )
+            continue
+
+        common_portfolios = set.intersection(
+            *(
+                set(
+                    results_store[strategy][model_name].index
+                )
+                for model_name in model_names
+            )
+        )
+
+        for portfolio in sorted(common_portfolios):
+            wide_rows.append(
+                build_wide_result(
+                    strategy=strategy,
+                    sample=sample,
+                    portfolio=portfolio,
+                    performance=performance_by_portfolio[portfolio],
+                    pruning_metadata=pruning_metadata_by_portfolio[
+                        portfolio
+                    ],
+                    model_results=results_store[strategy],
+                    model_names=model_names,
+                    xs_lookup=xs_lookup,
+                )
+            )
+
+    if not all_regression_rows:
+        raise RuntimeError(
+            "No Full or Cleaned sample factor regressions "
+            "were successfully estimated."
+        )
+
+    if not wide_rows:
+        raise RuntimeError(
+            "No Section-SDF has complete results across all factor models."
+        )
+
+    regression_long = pd.DataFrame(all_regression_rows)
+    wide_results = pd.DataFrame(wide_rows)
+
+    # Detailed audit table: factor alpha, HAC inference, R², XS-R²,
+    # performance, and lambdas.
+    regression_long_columns = [
+        "Sample",
+        "Strategy",
+        "Model_Name",
+        "Weight_Scheme",
+        "Section_SDF",
+        "Section",
+        "Feature",
+        "Model",
+        "Alpha_Monthly",
+        "Alpha_Annualized",
+        "Alpha_t",
+        "Alpha_p",
+        "Regression_Nobs",
+        "Newey_West_Lags",
+        "R²",
+        "XS_R²",
+        "Annualized_Sharpe",
+        "Monthly_Sharpe",
+        "Max_Drawdown",
+        "Monthly_Avg_Excess_Return",
+        "Best_Lambda0",
+        "Best_Lambda2",
+        "Selected_Nodes",
+    ]
+
+    write_csv(
+        regression_long.loc[:, regression_long_columns],
+        "All_Regression_Results.csv",
+    )
+
+    write_csv(
+        compact_table(
+            wide_results.sort_values(
+                ["Sample", "Monthly_Sharpe"],
+                ascending=[True, False],
+            ),
+            model_names,
+        ),
+        "All_Section_SDF_Results_Wide.csv",
+    )
+
+    # -------------------------------------------------------------------------
+    # 4. Top 10: Full and Cleaned are ranked independently.
+    # -------------------------------------------------------------------------
+    all_model_significant = wide_results.loc[
+        wide_results["Passes_All_Models"]
+    ].copy()
+
+    for sample in ("Full", "Cleaned"):
+        ranked = (
+            all_model_significant.loc[
+                all_model_significant["Sample"].eq(sample)
+            ]
+            .sort_values("Monthly_Sharpe", ascending=False)
+            .head(CONFIG["top_n"])
+            .copy()
+        )
+
+        ranked.insert(
+            0,
+            "Rank",
+            range(1, len(ranked) + 1),
+        )
+
+        write_csv(
+            compact_table(
+                ranked,
+                model_names,
+                include_rank=True,
+            ),
+            f"Top10_AllModelsSignificant_{sample}.csv",
+        )
+
+    # -------------------------------------------------------------------------
+    # 5. Long-only: one compact Sharpe/performance summary only.
+    # -------------------------------------------------------------------------
+    long_only_summary = build_long_only_sharpe_summary(returns_store)
+
+    write_csv(
+        long_only_summary,
+        "LongOnly_Sharpe_Summary.csv",
+    )
+
+    # -------------------------------------------------------------------------
+    # 6. Top-SDF selected-node weight distributions for future 3D figures.
+    # -------------------------------------------------------------------------
+    top_sdf_weights = build_top_sdf_weight_distributions(
+        wide_results
+    )
+
+    write_csv(
+        top_sdf_weights,
+        "Top_SDF_Weight_Distributions.csv",
+    )
+
+    # -------------------------------------------------------------------------
+    # 7. Reproducibility manifest.
+    # -------------------------------------------------------------------------
+    manifest_rows = []
+
+    for model_name, factors in factor_models.items():
+        manifest_rows.append({
+            "Model": model_name,
+            "Factor_File": CONFIG["models"][model_name]["file"],
+            "Factor_Columns_Used": ", ".join(factors.columns),
+            "Factor_Start": factors.index.min(),
+            "Factor_End": factors.index.max(),
+            "Factor_Months": len(factors),
+            "Alpha_Significance_Level": CONFIG[
+                "significance_level"
+            ],
+            "Require_Positive_Alpha": CONFIG[
+                "require_positive_alpha"
+            ],
+            "Newey_West_Lags": (
+                "automatic"
+                if CONFIG["nw_lags"] is None
+                else CONFIG["nw_lags"]
+            ),
+            "Top_N_Per_Sample": CONFIG["top_n"],
+        })
+
+    write_csv(
+        pd.DataFrame(manifest_rows),
+        "Factor_Test_Run_Manifest.csv",
+    )
+
+    print("\n" + "=" * 80)
+    print("Factor model tests completed.")
+    print(f"Output directory: {output_dir}")
+    print("Primary paper-ready outputs:")
+    print("  All_Section_SDF_Results_Wide.csv")
+    print("  Top10_AllModelsSignificant_Full.csv")
+    print("  Top10_AllModelsSignificant_Cleaned.csv")
+    print("  XS_R²_Cleaned_Sample.csv")
+    print("  LongOnly_Sharpe_Summary.csv")
+    print("  Top_SDF_Weight_Distributions.csv")
+    print("=" * 80)
 
 if __name__ == "__main__":
     main()
