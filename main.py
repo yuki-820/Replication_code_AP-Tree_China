@@ -9,8 +9,8 @@ Steps:
 2. Build candidate pools for all models (run build_pool.py in each model subfolder).
 3. Prune all models (run prune.py in each model subfolder).
 4. Run factor model tests (step4_factor_tests.py).
-5. Run plotting (step5_plot.py).
-6. Run turnover analysis (step6_turnover.py).
+5. Run turnover analysis (step5_turnover.py).
+6. Run plotting (step6_plot.py).
 
 Usage:
     python main.py
@@ -52,7 +52,7 @@ def run_script(script_path, description):
 
 def main():
     print("=" * 80)
-    print("Replication Pipeline for AP-Tree in China")
+    print("Replication Pipeline for Asset Pricing with ML")
     print("=" * 80)
 
     # Step 1: Data process (commented out – assume data already prepared)
@@ -94,25 +94,25 @@ def main():
     else:
         print("Error: step4_factor_tests.py not found. Skipping factor tests.")
 
-    # Step 5: Plotting
+    # Step 5: Turnover analysis (formerly step6)
     print("\n" + "=" * 80)
-    print("Step 5: Plotting (figures)")
+    print("Step 5: Turnover analysis")
     print("=" * 80)
-    plot_script = CODE_DIR / "step5_plot.py"
-    if plot_script.exists():
-        run_script(plot_script, "Plotting (step5)")
-    else:
-        print("Warning: step5_plot.py not found. Skipping plotting.")
-
-    # Step 6: Turnover analysis
-    print("\n" + "=" * 80)
-    print("Step 6: Turnover analysis")
-    print("=" * 80)
-    turnover_script = CODE_DIR / "step6_turnover.py"
+    turnover_script = CODE_DIR / "step5_turnover.py"
     if turnover_script.exists():
-        run_script(turnover_script, "Turnover analysis (step6)")
+        run_script(turnover_script, "Turnover analysis (step5)")
     else:
-        print("Warning: step6_turnover.py not found. Skipping turnover analysis.")
+        print("Warning: step5_turnover.py not found. Skipping turnover analysis.")
+
+    # Step 6: Plotting (formerly step5)
+    print("\n" + "=" * 80)
+    print("Step 6: Plotting (figures)")
+    print("=" * 80)
+    plot_script = CODE_DIR / "step6_plot.py"
+    if plot_script.exists():
+        run_script(plot_script, "Plotting (step6)")
+    else:
+        print("Warning: step6_plot.py not found. Skipping plotting.")
 
     print("\n" + "=" * 80)
     print("All steps completed successfully.")
